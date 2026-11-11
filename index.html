@@ -24,6 +24,9 @@ const { Engine, Bodies, Body, Composite } = Matter;
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 let W, H, dpr, engine, balls, walls;
 let gTarget = { x: 0, y: 1 }, gNow = { x: 0, y: 1 };
+// 重力の強さ:長くスワイプするほど少し強くなる(1倍〜G_MAX倍)
+const G_MAX = 1.5;
+let gPow = 1, gPowTarget = 1;
 
 const MAXLV = 14;   // 0始まり。表示は1〜15
 const BONUS = 1000000; // 15が3つ繋がって消えたときのボーナス
@@ -144,8 +147,10 @@ function buttons() {
   const w = Math.min(240, W * 0.7), h = 48, x = W / 2 - w / 2;
   if (mode === 'title') return [
     { id: 'start', label: 'スタート', x, y: H * 0.5, w, h },
-    { id: 'rank', label: 'ランキング', x, y: H * 0.5 + 64, w, h }
+    { id: 'rank', label: 'ランキング', x, y: H * 0.5 + 64, w, h },
+    { id: 'help', label: '遊び方', x, y: H * 0.5 + 128, w, h }
   ];
+  if (mode === 'help') return [{ id: 'title', label: 'もどる', x, y: helpLayout().backY, w, h }];
   if (mode === 'rank') {
     const L = rankLayout(), list = [];
     if (online) {
@@ -172,16 +177,30 @@ function rankLayout() {
   const sp = Math.max(18, Math.min(30, (H - top - 70) / n));
   return { top, n, sp, backY: Math.min(top + n * sp + 10, H - 56) };
 }
+// 遊び方の説明
+const HELP = [
+  'スワイプした方向が「下」になり、ボールが流れる',
+  '長くスワイプするほど、重力が少し強くなる',
+  '同じ数字がぶつかると、次の数字に合体(最大15)',
+  '大きい数字を作るほど高得点',
+  '15が3つくっつくと消えて +1,000,000',
+  'ボールが80個以上の状態が2秒続くとゲームオーバー'
+];
+function helpLayout() {
+  const top = 90, sp = Math.max(24, Math.min(40, (H - top - 70) / HELP.length));
+  return { top, sp, backY: Math.min(top + HELP.length * sp + 10, H - 56) };
+}
 function startGame() {
   hideEntry();
   init();
-  gTarget = { x: 0, y: 1 }; gNow = { x: 0, y: 1 };
+  gTarget = { x: 0, y: 1 }; gNow = { x: 0, y: 1 }; gPow = gPowTarget = 1;
   mode = 'play';
   setHint(1);
 }
 function press(id) {
   if (id === 'start' || id === 'retry') startGame();
   else if (id === 'rank') openRank();
+  else if (id === 'help') mode = 'help';
   else if (id === 'tabG') { rankTab = 'global'; loadGlobal(); }
   else if (id === 'tabL') rankTab = 'local';
   else if (id === 'title') { hideEntry(); mode = 'title'; over = false; }
@@ -292,8 +311,12 @@ cv.addEventListener('pointerdown', e => {
 cv.addEventListener('pointermove', e => {
   if (!down) return;
   const dx = e.clientX - down.x, dy = e.clientY - down.y, d = Math.hypot(dx, dy);
-  moved += d;
-  if (d > 4) { gTarget = { x: dx / d, y: dy / d }; down = { x: e.clientX, y: e.clientY }; }
+  if (d > 4) {
+    moved += d;
+    gTarget = { x: dx / d, y: dy / d }; down = { x: e.clientX, y: e.clientY };
+    // 画面の短辺の6割ほどスワイプすると最大の強さ
+    gPowTarget = 1 + (G_MAX - 1) * Math.min(1, moved / (Math.min(W, H) * 0.6));
+  }
   document.getElementById('hint').style.opacity = 0;
 });
 function end() { down = null; }
@@ -322,7 +345,8 @@ function loop(now) {
     // 重力の向きをなめらかに切り替える
     gNow.x += (gTarget.x - gNow.x) * 0.15;
     gNow.y += (gTarget.y - gNow.y) * 0.15;
-    engine.gravity.x = gNow.x; engine.gravity.y = gNow.y;
+    gPow += (gPowTarget - gPow) * 0.15;
+    engine.gravity.x = gNow.x * gPow; engine.gravity.y = gNow.y * gPow;
     Engine.update(engine, 1000 / 60);
     checkTriple();
     if (bonusT > 0) bonusT--;
@@ -349,6 +373,12 @@ function drawMenu() {
     ctx.font = '15px sans-serif'; ctx.fillStyle = '#fffa';
     ctx.fillText('スワイプで重力を変えて、同じ数字を合体させよう', W / 2, H * 0.28 + 44);
     ctx.fillText(`ハイスコア ${hi}`, W / 2, H * 0.28 + 72);
+  } else if (mode === 'help') {
+    ctx.font = 'bold 28px sans-serif';
+    ctx.fillText('遊び方', W / 2, 40);
+    const L = helpLayout();
+    ctx.font = `${Math.min(16, L.sp * 0.6)}px sans-serif`;
+    HELP.forEach((t, i) => ctx.fillText(t, W / 2, L.top + i * L.sp + L.sp / 2, W - 32));
   } else {
     ctx.font = 'bold 28px sans-serif';
     ctx.fillText('ランキング', W / 2, 40);
@@ -387,7 +417,7 @@ function draw() {
     ctx.fillText(b.level + 1, b.position.x, b.position.y + 1);
   }
   // 重力の向きを示す矢印
-  const cx = W / 2, cy = H / 2, L = 40;
+  const cx = W / 2, cy = H / 2, L = 40 * gPow; // 矢印の長さで重力の強さを表す
   const m = Math.hypot(gNow.x, gNow.y) || 1, ux = gNow.x / m, uy = gNow.y / m;
   ctx.strokeStyle = '#fff3'; ctx.lineWidth = 3; ctx.lineCap = 'round';
   ctx.beginPath(); ctx.moveTo(cx - ux * L, cy - uy * L); ctx.lineTo(cx + ux * L, cy + uy * L);
