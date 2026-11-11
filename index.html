@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>重力スワイプ</title>
+<style>
+  html,body{margin:0;height:100%;background:#12151d;overflow:hidden;overscroll-behavior:none}
+  canvas{display:block;width:100%;height:100%;touch-action:none}
+  #hint{position:fixed;bottom:16px;left:0;right:0;text-align:center;color:#fff6;font:14px sans-serif;pointer-events:none;transition:opacity 1s}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">スワイプした方向が「下」になる / 同じ数字がぶつかると合体 / 増えすぎたら負け</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script>
+const { Engine, Bodies, Body, Composite } = Matter;
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W, H, dpr, engine, balls, walls;
+let gTarget = { x: 0, y: 1 }, gNow = { x: 0, y: 1 };
+
+const MAXLV = 14;   // 0始まり。表示は1〜15
+const BONUS = 1000000; // 15が3つ繋がって消えたときのボーナス
+let S = 1; // 画面サイズに応じた拡大率(400pxの画面を基準に1)
+const radiusOf = lv => 16 * S * Math.pow(1.12, lv); // 段階ごとの大きさの差は約12%
+const hueOf = lv => lv * 24;
+
+function makeBall(x, y, lv) {
+  const b = Bodies.circle(x, y, radiusOf(lv), { restitution: 0.4, friction: 0.1, density: 0.001 });
+  b.level = lv;
+  balls.push(b); Composite.add(engine.world, b);
+  return b;
+}
+
+// 降ってくる段階の決め方:正規分布(平均とばらつきが時間で増える)
+const SPAWN_CAP = 7; // 降ってくる最大の段階(0始まり。7 = 表示は8)
+function gauss() {
+  return Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
+}
+function pickLevel() {
+  const sec = ticks / 60;
+  const mean = 0.5 + sec / 30;     // 30秒ごとに平均が1段階上がる
+  const sigma = 0.6 + sec / 25;    // ばらつきも広がる
+  return Math.max(0, Math.min(SPAWN_CAP, Math.round(mean + gauss() * sigma)));
+}
+
+function addBalls(x, y, n) {
+  for (let i = 0; i < n; i++) {
+    const lv = pickLevel();
+    makeBall(x + (Math.random() - 0.5) * 30, y + (Math.random() - 0.5) * 30, lv);
+  }
+}
+
+// --- ゲーム状態 ---
+const LIMIT = 80;      // この数に達した状態が続くと終了
+const GRACE = 120;     // 猶予(約2秒 = 120ステップ)
+let over, ticks, nextSpawn, full, merges, best, score, bonusT = 0, bonusV = 0;
+let hi = 0;
+try { hi = +localStorage.getItem('gravHi') || 0; } catch (e) {}
+
+function resetState() {
+  over = false; ticks = 0; nextSpawn = 30; full = 0; merges = 0; best = 0; score = 0; bonusT = 0;
+}
+
+// 最大段階(15)のボールが3つ以上くっついていたら、まとめて消してボーナス
+function checkTriple() {
+  const top = balls.filter(b => b.level === MAXLV);
+  if (top.length < 3) return;
+  const seen = new Set();
+  for (const s of top) {
+    if (seen.has(s)) continue;
+    const comp = [s]; seen.add(s);
+    for (let i = 0; i < comp.length; i++) {
+      for (const o of top) {
+        if (seen.has(o)) continue;
+        const d = Math.hypot(comp[i].position.x - o.position.x, comp[i].position.y - o.position.y);
+        if (d <= comp[i].circleRadius + o.circleRadius + 2) { seen.add(o); comp.push(o); }
+      }
+    }
+    if (comp.length >= 3) {
+      for (const b of comp) Composite.remove(engine.world, b);
+      balls = balls.filter(b => !comp.includes(b));
+      const v = BONUS * Math.floor(comp.length / 3);
+      score += v; bonusV = v; bonusT = 120;
+    }
+  }
+}
+
+function onCollide(ev) {
+  const used = new Set();
+  for (const p of ev.pairs) {
+    const a = p.bodyA, b = p.bodyB;
+    if (a.level === undefined || b.level === undefined) continue;
+    if (a.level !== b.level || a.level >= MAXLV) continue;
+    if (used.has(a) || used.has(b)) continue;
+    used.add(a); used.add(b);
+    const x = (a.position.x + b.position.x) / 2, y = (a.position.y + b.position.y) / 2;
+    const lv = a.level + 1;
+    Composite.remove(engine.world, a); Composite.remove(engine.world, b);
+    balls = balls.filter(q => q !== a && q !== b);
+    const nb = makeBall(x, y, lv);
+    nb.pop = 1; // 合体時の演出用
+    merges++; best = Math.max(best, lv);
+    score += 10 * Math.pow(2, lv); // 大きい数字ほど指数的に高得点
+  }
+}
+
+function init() {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  S = Math.min(W, H) / 400;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  engine = Engine.create();
+  balls = [];
+  const t = 60, o = { isStatic: true, restitution: 0.3 };
+  walls = [
+    Bodies.rectangle(W / 2, H + t / 2, W * 2, t, o),
+    Bodies.rectangle(W / 2, -t / 2, W * 2, t, o),
+    Bodies.rectangle(-t / 2, H / 2, t, H * 2, o),
+    Bodies.rectangle(W + t / 2, H / 2, t, H * 2, o)
+  ];
+  Composite.add(engine.world, walls);
+  Matter.Events.on(engine, 'collisionStart', onCollide);
+  resetState();
+  addBalls(W / 2, H / 3, 15);
+}
+
+// --- 入力 ---
+let down = null, moved = 0;
+cv.addEventListener('pointerdown', e => {
+  if (over) { init(); return; }
+  down = { x: e.clientX, y: e.clientY }; moved = 0;
+});
+cv.addEventListener('pointermove', e => {
+  if (!down) return;
+  const dx = e.clientX - down.x, dy = e.clientY - down.y, d = Math.hypot(dx, dy);
+  moved += d;
+  if (d > 4) { gTarget = { x: dx / d, y: dy / d }; down = { x: e.clientX, y: e.clientY }; }
+  document.getElementById('hint').style.opacity = 0;
+});
+function end() { down = null; }
+cv.addEventListener('pointerup', end);
+cv.addEventListener('pointercancel', () => { down = null; });
+addEventListener('resize', init);
+
+// --- ループ ---
+let acc = 0, prev = performance.now();
+function loop(now) {
+  acc += Math.min(now - prev, 50); prev = now;
+  while (acc >= 1000 / 60) {
+    if (over) { acc = 0; break; }
+    ticks++;
+    // 自動でボールが降る(時間とともに間隔が短くなる)
+    if (ticks >= nextSpawn) {
+      addBalls(W * (0.15 + Math.random() * 0.7), H * (0.15 + Math.random() * 0.7), 1);
+      nextSpawn = ticks + Math.max(10, 24 - ticks / 60);
+    }
+    // 満杯の状態が続いたら終了
+    full = balls.length >= LIMIT ? full + 1 : 0;
+    if (full >= GRACE) {
+      over = true;
+      if (score > hi) { hi = score; try { localStorage.setItem('gravHi', hi); } catch (e) {} }
+    }
+    // 重力の向きをなめらかに切り替える
+    gNow.x += (gTarget.x - gNow.x) * 0.15;
+    gNow.y += (gTarget.y - gNow.y) * 0.15;
+    engine.gravity.x = gNow.x; engine.gravity.y = gNow.y;
+    Engine.update(engine, 1000 / 60);
+    checkTriple();
+    if (bonusT > 0) bonusT--;
+    acc -= 1000 / 60;
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  for (const b of balls) {
+    if (b.pop > 0) b.pop -= 0.08;
+    const r = b.circleRadius * (1 + Math.max(b.pop || 0, 0) * 0.25);
+    ctx.fillStyle = `hsl(${hueOf(b.level)},75%,60%)`;
+    ctx.beginPath(); ctx.arc(b.position.x, b.position.y, r, 0, 7); ctx.fill();
+    ctx.fillStyle = '#0008'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `bold ${Math.max(9, r * (b.level >= 9 ? 0.75 : 0.9))}px sans-serif`;
+    ctx.fillText(b.level + 1, b.position.x, b.position.y + 1);
+  }
+  // 重力の向きを示す矢印
+  const cx = W / 2, cy = H / 2, L = 40;
+  const m = Math.hypot(gNow.x, gNow.y) || 1, ux = gNow.x / m, uy = gNow.y / m;
+  ctx.strokeStyle = '#fff3'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(cx - ux * L, cy - uy * L); ctx.lineTo(cx + ux * L, cy + uy * L);
+  ctx.moveTo(cx + ux * L, cy + uy * L); ctx.lineTo(cx + ux * L - ux * 12 + uy * 8, cy + uy * L - uy * 12 - ux * 8);
+  ctx.moveTo(cx + ux * L, cy + uy * L); ctx.lineTo(cx + ux * L - ux * 12 - uy * 8, cy + uy * L - uy * 12 + ux * 8);
+  ctx.stroke();
+
+  // HUD
+  const warn = balls.length >= LIMIT * 0.8;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.font = 'bold 16px sans-serif';
+  ctx.fillStyle = warn ? '#ff6b6b' : '#fffa';
+  ctx.fillText(`数 ${balls.length}/${LIMIT}`, 12, 12);
+  ctx.fillStyle = '#fffa';
+  ctx.textAlign = 'right';
+  ctx.fillText(`スコア ${score}`, W - 12, 12);
+  ctx.fillText(`最大 ${best + 1} / ハイ ${Math.max(hi, score)}`, W - 12, 34);
+  if (full > 0 && !over) {
+    ctx.fillStyle = `rgba(255,80,80,${0.15 + 0.15 * Math.sin(full / 4)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (bonusT > 0 && !over) {
+    ctx.fillStyle = `rgba(255,230,120,${Math.min(1, bonusT / 40)})`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold 30px sans-serif';
+    ctx.fillText(`ボーナス +${bonusV}`, W / 2, H / 3);
+  }
+  if (over) {
+    ctx.fillStyle = '#000a'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold 32px sans-serif'; ctx.fillText('ゲームオーバー', W / 2, H / 2 - 40);
+    ctx.font = '18px sans-serif';
+    ctx.fillText(`スコア ${score}${score >= hi && score > 0 ? '(ハイスコア!)' : ''}`, W / 2, H / 2 + 4);
+    ctx.fillText('タップでもう一度', W / 2, H / 2 + 44);
+  }
+}
+
+init();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
