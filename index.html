@@ -109,7 +109,7 @@ function onCollide(ev) {
 function init() {
   dpr = Math.min(devicePixelRatio || 1, 2);
   W = innerWidth; H = innerHeight;
-  S = Math.min(W, H) / 400;
+  S = Math.sqrt(W * H) / 570; // 面積基準(縦長のスマホ 390x844 で約1)
   cv.width = W * dpr; cv.height = H * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   engine = Engine.create();
