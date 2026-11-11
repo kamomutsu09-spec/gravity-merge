@@ -121,7 +121,17 @@ function openRank() {
 const entry = document.getElementById('entry'), nm = document.getElementById('nm');
 const sendBtn = document.getElementById('send'), msg = document.getElementById('msg');
 try { nm.value = localStorage.getItem('gravName') || ''; } catch (e) {}
+// 自分が登録した記録 { name, s, pos }(pos = みんなの中での順位、取れなければ 0)
+let mine = null;
+async function fetchMyPos(s) {
+  try {
+    const r = await fetch(`${SB_URL}/rest/v1/scores?select=id&score=gt.${s}&limit=1`, { headers: { apikey: SB_KEY, Prefer: 'count=exact' } });
+    const total = +(r.headers.get('content-range') || '').split('/')[1];
+    return Number.isFinite(total) ? total + 1 : 0; // 自分より上の件数 + 1
+  } catch (e) { return 0; }
+}
 function showEntry() {
+  mine = null;
   if (!online || score <= 0) return;
   nm.style.display = sendBtn.style.display = ''; sendBtn.disabled = false; msg.textContent = '';
   entry.style.display = 'flex';
@@ -137,6 +147,9 @@ entry.addEventListener('submit', async e => {
     await submitScore(name, score);
     nm.style.display = sendBtn.style.display = 'none'; nm.blur();
     msg.textContent = 'みんなのランキングに登録しました!';
+    const pos = await fetchMyPos(score);
+    mine = { name, s: score, pos };
+    if (pos) msg.textContent = `登録しました!みんなの中で ${pos}位`;
   } catch (err) {
     sendBtn.disabled = false; msg.textContent = '送信できませんでした';
   }
@@ -163,10 +176,13 @@ function buttons() {
   }
   if (over) {
     const bw = Math.min(150, W * 0.4);
-    return [
+    const list = [
       { id: 'retry', label: 'もう一度', x: W / 2 - bw - 8, y: H / 2 + 50, w: bw, h },
       { id: 'title', label: 'タイトルへ', x: W / 2 + 8, y: H / 2 + 50, w: bw, h }
     ];
+    // 登録が済んだら、その場でランキングを見られるボタンを出す
+    if (mine) list.push({ id: 'seeRank', label: 'ランキングを見る', x: W / 2 - bw - 8, y: H / 2 + 110, w: bw * 2 + 16, h, on: true });
+    return list;
   }
   return [];
 }
@@ -174,8 +190,9 @@ const setHint = v => { document.getElementById('hint').style.opacity = v; };
 // ランキング画面の行の位置(横画面でも収まるように行間を縮める)
 function rankLayout() {
   const top = online ? 120 : 76, n = rankTab === 'global' ? G_N : RANK_N;
-  const sp = Math.max(18, Math.min(30, (H - top - 70) / n));
-  return { top, n, sp, backY: Math.min(top + n * sp + 10, H - 56) };
+  const sp = Math.max(18, Math.min(30, (H - top - 96) / n));
+  // リストの下に「あなた: ○位」の1行ぶん空けて、もどるボタンを置く
+  return { top, n, sp, noteY: top + n * sp + 16, backY: Math.min(top + n * sp + 36, H - 56) };
 }
 // 遊び方の説明
 const HELP = [
@@ -201,6 +218,7 @@ function press(id) {
   if (id === 'start' || id === 'retry') startGame();
   else if (id === 'rank') openRank();
   else if (id === 'help') mode = 'help';
+  else if (id === 'seeRank') { hideEntry(); rankTab = 'global'; openRank(); }
   else if (id === 'tabG') { rankTab = 'global'; loadGlobal(); }
   else if (id === 'tabL') rankTab = 'local';
   else if (id === 'title') { hideEntry(); mode = 'title'; over = false; }
@@ -389,8 +407,15 @@ function drawMenu() {
     else if (rankTab === 'global' && gState === 'err') note = '読み込めませんでした';
     else if (!rows.length) note = 'まだ記録がありません';
     if (note) { ctx.font = '18px sans-serif'; ctx.fillStyle = '#fff8'; ctx.fillText(note, W / 2, L.top + 30); }
-    else rows.forEach((r, i) => {
+    // 自分が今回登録した記録(みんなタブのみ)
+    const myIdx = rankTab === 'global' && mine ? rows.findIndex(r => r.name === mine.name && r.s === mine.s) : -1;
+    if (!note && rankTab === 'global' && mine && myIdx < 0) {
+      ctx.textAlign = 'center'; ctx.font = `${fs}px sans-serif`; ctx.fillStyle = '#ffd76a';
+      ctx.fillText(`あなた: ${mine.pos ? mine.pos + '位 ' : ''}${mine.s}`, W / 2, L.noteY);
+    }
+    if (!note) rows.forEach((r, i) => {
       const y = L.top + i * L.sp + L.sp / 2;
+      if (i === myIdx) { ctx.fillStyle = '#ffd76a30'; ctx.fillRect(W / 2 - 158, y - L.sp / 2 + 1, 316, L.sp - 2); }
       ctx.font = `${fs}px sans-serif`;
       ctx.fillStyle = i === 0 ? '#ffd76a' : '#fff';
       ctx.textAlign = 'left'; ctx.fillText(`${i + 1}位`, W / 2 - 150, y);
