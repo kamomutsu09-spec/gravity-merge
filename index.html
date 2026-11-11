@@ -417,9 +417,11 @@ function draw() {
     ctx.fillText(b.level + 1, b.position.x, b.position.y + 1);
   }
   // 重力の向きを示す矢印
-  const cx = W / 2, cy = H / 2, L = 40 * gPow; // 矢印の長さで重力の強さを表す
+  // 重力の強さ(1〜G_MAX)を 0〜1 にして、矢印の長さ・太さ・濃さに反映
+  const t = Math.max(0, Math.min(1, (gPow - 1) / (G_MAX - 1)));
+  const cx = W / 2, cy = H / 2, L = (25 + 40 * t) * S; // 半分の長さ。全長は弱い時50px〜強い時130px(標準画面)
   const m = Math.hypot(gNow.x, gNow.y) || 1, ux = gNow.x / m, uy = gNow.y / m;
-  ctx.strokeStyle = '#fff3'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.strokeStyle = `rgba(255,255,255,${0.2 + 0.25 * t})`; ctx.lineWidth = 3 + 2 * t; ctx.lineCap = 'round';
   ctx.beginPath(); ctx.moveTo(cx - ux * L, cy - uy * L); ctx.lineTo(cx + ux * L, cy + uy * L);
   ctx.moveTo(cx + ux * L, cy + uy * L); ctx.lineTo(cx + ux * L - ux * 12 + uy * 8, cy + uy * L - uy * 12 - ux * 8);
   ctx.moveTo(cx + ux * L, cy + uy * L); ctx.lineTo(cx + ux * L - ux * 12 - uy * 8, cy + uy * L - uy * 12 + ux * 8);
