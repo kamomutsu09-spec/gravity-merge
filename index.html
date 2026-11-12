@@ -519,7 +519,11 @@ function loop(now) {
     // 自動でボールが降る(時間とともに間隔が短くなる)
     if (ticks >= nextSpawn) {
       addBalls(W * (0.15 + Math.random() * 0.7), H * (0.15 + Math.random() * 0.7), 1);
-      nextSpawn = ticks + Math.max(10, 24 - ticks / 60);
+      const sec = ticks / 60;
+      let iv = Math.max(10, 24 - sec); // 降る間隔(ステップ数)。約14秒で10まで縮む
+      // ゼロ重力は14秒を過ぎても縮み続ける(44秒で5、74秒で約3.3、下限3)
+      if (gameMode === 'zero' && sec > 14) iv = Math.max(3, 10 / (1 + (sec - 14) / 30));
+      nextSpawn = ticks + iv;
     }
     // 満杯の状態が続いたら終了
     full = balls.length >= LIMIT ? full + 1 : 0;
