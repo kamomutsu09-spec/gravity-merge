@@ -51,17 +51,64 @@ const better = (a, b, m) => isTime(m) ? a < b : a > b; // a が b より良い�
 const fmtTime = ms => { const t = Math.round(ms / 100); return `${Math.floor(t / 600)}:${String(Math.floor(t / 10) % 60).padStart(2, '0')}.${t % 10}`; };
 const fmtVal = (v, m) => isTime(m) ? fmtTime(v) : String(v);
 
+// --- 効果音と振動(音声ファイルは使わず、Web Audio で合成する) ---
+let soundOn = true;
+try { soundOn = localStorage.getItem('gravSound') !== '0'; } catch (e) {}
+let actx = null;
+function audio() {
+  if (!soundOn) return null;
+  if (!actx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    actx = new AC(); // ブラウザの制限で、最初のタップの中で作る必要がある
+  }
+  if (actx.state === 'suspended') actx.resume();
+  return actx;
+}
+// 1音鳴らす:周波数 freq、長さ dur 秒、slide を指定すると終わりに向けて音程が変わる
+function tone(freq, dur, type = 'sine', vol = 0.12, when = 0, slide = 0) {
+  const a = audio(); if (!a) return;
+  const t = a.currentTime + when, o = a.createOscillator(), g = a.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(freq * slide, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(a.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function buzz(p) { if (soundOn && navigator.vibrate) try { navigator.vibrate(p); } catch (e) {} }
+const chord = (base, steps, gap, type = 'triangle', vol = 0.13) =>
+  steps.forEach((s, i) => tone(base * Math.pow(2, s / 12), 0.28, type, vol, i * gap));
+let lastMergeSnd = 0;
+const sfx = {
+  // 合体:数字が大きいほど高い音。連続しすぎないよう間引く
+  merge(lv) {
+    const now = performance.now(); if (now - lastMergeSnd < 45) return; lastMergeSnd = now;
+    tone(220 * Math.pow(2, lv / 4), 0.12, 'triangle', 0.1); buzz(8);
+  },
+  big() { chord(523, [0, 4, 7, 12], 0.09); buzz([30, 40, 60]); },      // 15ができた
+  bonus() { chord(659, [0, 7, 12, 19, 24], 0.07); buzz([40, 30, 40, 30, 80]); }, // 15が3つで消えた
+  over() { tone(330, 0.6, 'sawtooth', 0.07, 0, 0.4); buzz(200); },      // ゲームオーバー
+  click() { tone(880, 0.05, 'square', 0.04); }
+};
+function toggleSound() {
+  soundOn = !soundOn;
+  try { localStorage.setItem('gravSound', soundOn ? '1' : '0'); } catch (e) {}
+  if (soundOn) sfx.click();
+}
+
 const MAXLV = 14;   // 0始まり。表示は1〜15
 const BONUS = 1000000; // 15が3つ繋がって消えたときのボーナス
 let S = 1; // 画面サイズに応じた拡大率(400pxの画面を基準に1)
 const radiusOf = lv => 16 * S * Math.pow(1.12, lv); // 段階ごとの大きさの差は約12%
 const hueOf = lv => lv * 24;
 
+// 物理計算用のボールの形:Matter.js は円を多角形として扱う(標準は最大25角形)。
+// 角が多いほど当たり判定が重くなるので12角形にする(見た目は円のまま描く)
+const BALL_SIDES = 12;
 function makeBall(x, y, lv) {
   const b = Bodies.circle(x, y, radiusOf(lv), {
     restitution: 0.4, friction: 0.1, density: 0.001,
     frictionAir: gameMode === 'zero' ? 0.02 : 0.01 // ゼロ重力では空気抵抗で少しずつ止まる
-  });
+  }, BALL_SIDES);
   b.level = lv;
   balls.push(b); Composite.add(engine.world, b);
   return b;
@@ -91,6 +138,7 @@ function addBalls(x, y, n) {
 const LIMIT = 80;      // この数に達した状態が続くと終了
 const GRACE = 120;     // 猶予(約2秒 = 120ステップ)
 let over, ticks, nextSpawn, full, merges, best, score, bonusT = 0, bonusV = 0;
+let paused = false; // 一時停止中か(止めている間はタイムも進まない)
 let result = 0; // 記録する値(ノーマル/ゼロ重力 = スコア、15チャレンジ = タイム[ms])。記録なしは 0
 let hi = 0;
 try { hi = +localStorage.getItem('gravHi') || 0; } catch (e) {}
@@ -280,11 +328,24 @@ function selectLayout() {
 }
 function buttons() {
   const w = Math.min(240, W * 0.7), h = 48, x = W / 2 - w / 2;
+  const sndBtn = { id: 'snd', label: soundOn ? '音 ON' : '音 OFF', fs: 14 };
   if (mode === 'title') return [
     { id: 'select', label: 'モード選択', x, y: H * 0.5, w, h, on: true },
     { id: 'rank', label: 'ランキング', x, y: H * 0.5 + 64, w, h },
-    { id: 'help', label: '遊び方', x, y: H * 0.5 + 128, w, h }
+    { id: 'help', label: '遊び方', x, y: H * 0.5 + 128, w, h },
+    { ...sndBtn, x: W - 92, y: 12, w: 80, h: 34 }
   ];
+  // プレイ中:上の中央に一時停止ボタン。一時停止中はメニュー
+  if (mode === 'play' && !over) {
+    if (!paused) return [{ id: 'pause', label: 'II', x: W / 2 - 22, y: 8, w: 44, h: 36, fs: 16 }];
+    const y0 = H / 2 - 90;
+    return [
+      { id: 'resume', label: '再開', x, y: y0, w, h, on: true },
+      { id: 'retry', label: 'やり直す', x, y: y0 + 60, w, h },
+      { id: 'title', label: 'タイトルへ', x, y: y0 + 120, w, h },
+      { ...sndBtn, x, y: y0 + 180, w, h }
+    ];
+  }
   if (mode === 'select') {
     const L = selectLayout(), bw = Math.min(280, W - 48);
     const list = MODE_IDS.map((m, i) => ({ id: 'm_' + m, label: MODES[m].label, x: W / 2 - bw / 2, y: L.top + i * L.sp, w: bw, h: L.h, fs: 20 }));
@@ -341,22 +402,36 @@ const HELP = [
   'ボールが80個以上の状態が2秒続くとゲームオーバー',
   '【通常モード】スコアを稼ぐ。15が3つくっつくと +1,000,000',
   '【15チャレンジ】15を作るまでのタイムを競う',
-  '【ゼロ重力】重力なし。スワイプして離すと、その方向にボールを弾く'
+  '【ゼロ重力】重力なし。スワイプして離すと、その方向にボールを弾く',
+  'プレイ中は画面上の「II」で一時停止。音のオン/オフも切り替えられる'
 ];
 function helpLayout() {
   const top = 90, sp = Math.max(24, Math.min(40, (H - top - 70) / HELP.length));
   return { top, sp, backY: Math.min(top + HELP.length * sp + 10, H - 56) };
 }
+// 初めての人向けの案内(モードごとに初回だけ。1回スワイプすると消える)
+let tutorial = false;
+const tutKey = m => 'gravTut_' + m;
+function endTutorial() {
+  if (!tutorial) return;
+  tutorial = false;
+  try { localStorage.setItem(tutKey(gameMode), '1'); } catch (e) {}
+}
 function startGame() {
-  hideEntry(); peek = false;
+  hideEntry(); peek = false; paused = false; down = null;
   init();
   gTarget = { x: 0, y: 1 }; gNow = { x: 0, y: 1 }; gPow = gPowTarget = 1;
   mode = 'play';
+  try { tutorial = !localStorage.getItem(tutKey(gameMode)); } catch (e) { tutorial = false; }
   hintEl.textContent = MODES[gameMode].hint;
-  setHint(1);
+  setHint(tutorial ? 0 : 1); // 案内を出すときは下の説明文は隠す
 }
 function press(id) {
+  sfx.click();
   if (id.startsWith('m_')) { gameMode = id.slice(2); startGame(); }
+  else if (id === 'pause') { paused = true; down = null; setHint(0); }
+  else if (id === 'resume') paused = false;
+  else if (id === 'snd') toggleSound();
   else if (id.startsWith('rm_')) { rankMode = id.slice(3); if (online && isOnlineTab()) loadGlobal(); }
   else if (id === 'retry') startGame();
   else if (id === 'rank') { rankMode = gameMode; openRank(); }
@@ -367,7 +442,7 @@ function press(id) {
   else if (id === 'tabG') { rankTab = 'global'; loadGlobal(); }
   else if (id === 'tabD') { rankTab = 'daily'; loadGlobal(); }
   else if (id === 'tabL') rankTab = 'local';
-  else if (id === 'title') { hideEntry(); mode = 'title'; over = false; peek = false; }
+  else if (id === 'title') { hideEntry(); mode = 'title'; over = false; peek = false; paused = false; setHint(0); }
   else if (id === 'noticeOk') { try { localStorage.setItem(NOTICE_KEY, '1'); } catch (e) {} mode = 'title'; }
   else if (id === 'peek') { peek = true; entryWas = entry.style.display; entry.style.display = 'none'; nm.blur(); }
 }
@@ -382,6 +457,7 @@ function finish(ok) {
   over = true;
   if (gameMode === 'c15') result = ok ? Math.round(ticks * 1000 / 60) : 0; // 時間はステップ数から計算(処理落ちの影響を受けない)
   else result = score;
+  if (!(gameMode === 'c15' && ok)) sfx.over(); // 15チャレンジのクリアは15ができた音だけ
   recordResult(); setHint(0); showEntry();
 }
 
@@ -405,6 +481,7 @@ function checkTriple() {
       balls = balls.filter(b => !comp.includes(b));
       const v = BONUS * Math.floor(comp.length / 3);
       score += v; bonusV = v; bonusT = 120;
+      sfx.bonus();
     }
   }
 }
@@ -425,6 +502,7 @@ function onCollide(ev) {
     nb.pop = 1; // 合体時の演出用
     merges++; best = Math.max(best, lv);
     score += 10 * Math.pow(2, lv); // 大きい数字ほど指数的に高得点
+    if (lv === MAXLV) sfx.big(); else sfx.merge(lv);
     if (gameMode === 'c15' && lv === MAXLV) finish(true); // 15ができたらクリア
   }
 }
@@ -436,6 +514,7 @@ function layout() {
   S = Math.sqrt(W * H) / 570; // 面積基準(縦長のスマホ 390x844 で約1)
   cv.width = W * dpr; cv.height = H * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  sprites = {}; // 大きさが変わったので、ボールの絵を作り直す
 }
 
 function makeWalls() {
@@ -477,13 +556,13 @@ function init() {
 // --- 入力 ---
 let down = null;
 cv.addEventListener('pointerdown', e => {
-  if (mode !== 'play' || over) {
-    // 盤面を見ている間は、どこをタップしても結果画面に戻る
-    if (over && peek) { peek = false; entry.style.display = entryWas; return; }
-    const b = buttons().find(b => e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h);
-    if (b) press(b.id);
-    return;
-  }
+  audio(); // 音はユーザーの操作の中でしか鳴らし始められないので、最初のタップで準備する
+  // 盤面を見ている間は、どこをタップしても結果画面に戻る
+  if (over && peek) { peek = false; entry.style.display = entryWas; return; }
+  // ボタン(一時停止ボタンを含む)を押したか
+  const b = buttons().find(b => e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h);
+  if (b) { press(b.id); return; }
+  if (mode !== 'play' || over || paused) return;
   down = { x: e.clientX, y: e.clientY }; // スワイプの開始点
 });
 cv.addEventListener('pointermove', e => {
@@ -493,7 +572,12 @@ cv.addEventListener('pointermove', e => {
   if (d > 8) gTarget = { x: dx / d, y: dy / d }; // 開始点のすぐ近くでは向きを変えない
   // 画面の短辺の6割ほど離れると最大の強さ
   gPowTarget = 1 + (G_MAX - 1) * Math.min(1, d / (Math.min(W, H) * 0.6));
+  if (d > 40) endTutorial(); // しっかりスワイプできたら案内を消す
   setHint(0);
+});
+// 別のアプリに切り替えたら自動で一時停止
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && mode === 'play' && !over) { paused = true; down = null; }
 });
 // ゼロ重力:指を離した瞬間に、すべてのボールをスワイプの方向へ弾く
 function flick(e) {
@@ -510,12 +594,19 @@ cv.addEventListener('pointercancel', () => { down = null; });
 addEventListener('resize', onResize);
 
 // --- ループ ---
+// 物理は1秒に60回(固定)。画面の書き換えとは別に数える
+const STEP = 1000 / 60, MAX_STEPS = 2;
 let acc = 0, prev = performance.now();
 function loop(now) {
   acc += Math.min(now - prev, 50); prev = now;
-  while (acc >= 1000 / 60) {
-    if (over || mode !== 'play') { acc = 0; break; }
+  let steps = 0;
+  while (acc >= STEP) {
+    if (over || paused || mode !== 'play') { acc = 0; break; }
+    // 1コマで追いつくのは2回まで。それ以上の遅れは捨てる(遅れを取り戻そうとして、さらに重くなるのを防ぐ)
+    if (steps >= MAX_STEPS) { acc = 0; break; }
+    steps++;
     ticks++;
+    for (const b of balls) if (b.pop > 0) b.pop -= 0.08; // 合体演出の縮み(画面の速さに左右されないよう、ここで進める)
     // 自動でボールが降る(時間とともに間隔が短くなる)
     if (ticks >= nextSpawn) {
       addBalls(W * (0.15 + Math.random() * 0.7), H * (0.15 + Math.random() * 0.7), 1);
@@ -534,12 +625,14 @@ function loop(now) {
     gPow += (gPowTarget - gPow) * 0.15;
     if (gameMode === 'zero') { engine.gravity.x = 0; engine.gravity.y = 0; }
     else { engine.gravity.x = gNow.x * gPow; engine.gravity.y = gNow.y * gPow; }
-    Engine.update(engine, 1000 / 60);
+    Engine.update(engine, STEP);
     if (gameMode === 'normal' || gameMode === 'zero') checkTriple();
     if (bonusT > 0) bonusT--;
-    acc -= 1000 / 60;
+    acc -= STEP;
   }
-  draw();
+  // プレイ中は、物理が進んだコマだけ書き換える(120Hzの画面で同じ絵を2回描かない)。
+  // メニュー・一時停止・結果画面・案内表示中は毎コマ描く
+  if (steps > 0 || mode !== 'play' || over || paused || tutorial || down) draw();
   requestAnimationFrame(loop);
 }
 
@@ -551,6 +644,44 @@ function drawButtons() {
     ctx.font = `bold ${b.fs || 18}px sans-serif`;
     ctx.fillStyle = '#fff'; ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 1, b.w - 8);
   }
+}
+
+// ボールの絵を数字ごとに1回だけ作っておき、毎コマはそれを貼るだけにする(円と文字を毎回描くより軽い)
+// 合体演出で1.25倍まで大きくなるので、その大きさでもぼやけない解像度で作る
+let sprites = {};
+function ballSprite(lv) {
+  if (sprites[lv]) return sprites[lv];
+  const R = radiusOf(lv) * 1.25 * dpr, size = Math.ceil(R * 2) + 2;
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const g = c.getContext('2d'), m = size / 2;
+  g.fillStyle = `hsl(${hueOf(lv)},75%,60%)`;
+  g.beginPath(); g.arc(m, m, R, 0, 7); g.fill();
+  g.fillStyle = '#0008'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.font = `bold ${Math.max(9 * dpr, R * (lv >= 9 ? 0.75 : 0.9))}px sans-serif`;
+  g.fillText(lv + 1, m, m + R * 0.04);
+  return (sprites[lv] = c);
+}
+
+// 初回の案内:指(白い丸)が左から右へスワイプする動きを繰り返し見せる
+function drawTutorial() {
+  const p = (performance.now() % 1600) / 1600, e = Math.min(1, p / 0.7), ease = e * (2 - e);
+  const y = H * 0.36, x0 = W / 2 - 80, x = x0 + 160 * ease;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  // 説明文(読みやすいよう背景付き)
+  const t1 = gameMode === 'zero' ? 'スワイプして指を離すと' : '画面をスワイプしてみよう';
+  const t2 = gameMode === 'zero' ? 'その方向にボールが弾ける' : 'スワイプした方向が「下」になる';
+  ctx.font = 'bold 17px sans-serif';
+  const tw = Math.max(ctx.measureText(t1).width, ctx.measureText(t2).width) + 32;
+  ctx.fillStyle = '#000a'; ctx.beginPath(); ctx.roundRect(W / 2 - tw / 2, y - 92, tw, 60, 14); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.fillText(t1, W / 2, y - 73);
+  ctx.font = '14px sans-serif'; ctx.fillStyle = '#fffc'; ctx.fillText(t2, W / 2, y - 50);
+  // 指の軌跡と指
+  ctx.globalAlpha = p < 0.85 ? 1 : (1 - p) / 0.15;
+  ctx.strokeStyle = '#ffd76a99'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x, y); ctx.stroke();
+  ctx.fillStyle = '#fffe'; ctx.beginPath(); ctx.arc(x, y, 16, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#ffd76a'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, 22, 0, 7); ctx.stroke();
+  ctx.globalAlpha = 1;
 }
 
 // 結果画面の下に、登録した場合の順位と前後の記録を出す
@@ -654,13 +785,8 @@ function draw() {
   ctx.clearRect(0, 0, W, H);
   if (mode !== 'play') { drawMenu(); return; }
   for (const b of balls) {
-    if (b.pop > 0) b.pop -= 0.08;
     const r = b.circleRadius * (1 + Math.max(b.pop || 0, 0) * 0.25);
-    ctx.fillStyle = `hsl(${hueOf(b.level)},75%,60%)`;
-    ctx.beginPath(); ctx.arc(b.position.x, b.position.y, r, 0, 7); ctx.fill();
-    ctx.fillStyle = '#0008'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.font = `bold ${Math.max(9, r * (b.level >= 9 ? 0.75 : 0.9))}px sans-serif`;
-    ctx.fillText(b.level + 1, b.position.x, b.position.y + 1);
+    ctx.drawImage(ballSprite(b.level), b.position.x - r, b.position.y - r, r * 2, r * 2);
   }
   // 重力の向きを示す矢印(ゼロ重力では、スワイプ中だけ弾く向きと強さを表示)
   if (gameMode !== 'zero' || down) {
@@ -702,6 +828,14 @@ function draw() {
     ctx.font = 'bold 30px sans-serif';
     ctx.fillText(`ボーナス +${bonusV}`, W / 2, H / 3);
   }
+  if (!over && !paused && tutorial) drawTutorial();
+  if (!over && paused) {
+    ctx.fillStyle = '#000c'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold 28px sans-serif'; ctx.fillStyle = '#fff';
+    ctx.fillText('一時停止', W / 2, H / 2 - 140);
+  }
+  if (!over) drawButtons(); // 一時停止ボタン、または一時停止メニュー
   if (over && peek) {
     // 最後の盤面をそのまま見せ、戻り方だけ出す
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold 15px sans-serif';
