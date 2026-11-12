@@ -4,6 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>重力スワイプ</title>
+<meta name="description" content="スワイプで重力を変えて、同じ数字のボールを合体させるスマホ向けゲーム。通常・15チャレンジ・ゼロ重力の3モードと、みんなのランキング付き。">
+<meta name="theme-color" content="#12151d">
+<meta property="og:type" content="website">
+<meta property="og:title" content="重力スワイプ">
+<meta property="og:description" content="スワイプで重力を変えて、同じ数字を合体させよう。通常・15チャレンジ・ゼロ重力の3モードと、みんなのランキング付き。">
+<meta property="og:url" content="https://kamomutsu09-spec.github.io/gravity-merge/">
+<meta property="og:image" content="https://kamomutsu09-spec.github.io/gravity-merge/ogp.png?v=1">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%2312151d'/><circle cx='23' cy='42' r='14' fill='hsl(48,75%25,60%25)'/><circle cx='42' cy='27' r='17' fill='hsl(336,75%25,60%25)'/></svg>">
 <style>
   html,body{margin:0;height:100%;background:#12151d;overflow:hidden;overscroll-behavior:none}
   canvas{display:block;width:100%;height:100%;touch-action:none}
@@ -379,7 +390,10 @@ function buttons() {
       { id: 'peek', label: '画面を見る', x: x0 + (bw + 8) * 2, y: H / 2 + 50, w: bw, h }
     ];
     // 登録が済んだら、その場でランキングを見られるボタンを出す
-    if (mine) list.push({ id: 'seeRank', label: 'ランキングを見る', x: x0, y: H / 2 + 110, w: bw * 3 + 16, h, on: true });
+    // 2段目:シェア(登録後は「ランキングを見る」と半分ずつ)
+    const full2 = bw * 3 + 16, half = (full2 - 8) / 2;
+    list.push({ id: 'share', label: '𝕏でシェア', x: x0, y: H / 2 + 110, w: mine ? half : full2, h, fs: 17 });
+    if (mine) list.push({ id: 'seeRank', label: 'ランキングを見る', x: x0 + half + 8, y: H / 2 + 110, w: half, h, on: true, fs: 16 });
     return list;
   }
   return [];
@@ -445,6 +459,7 @@ function press(id) {
   else if (id === 'title') { hideEntry(); mode = 'title'; over = false; peek = false; paused = false; setHint(0); }
   else if (id === 'noticeOk') { try { localStorage.setItem(NOTICE_KEY, '1'); } catch (e) {} mode = 'title'; }
   else if (id === 'peek') { peek = true; entryWas = entry.style.display; entry.style.display = 'none'; nm.blur(); }
+  else if (id === 'share') shareOnUp = true; // 新しいタブは指を離したとき(pointerup)にしか開けないので、そこで開く
 }
 
 function resetState() {
@@ -586,7 +601,26 @@ function flick(e) {
   const t = Math.min(1, d / (Math.min(W, H) * 0.6)), sp = (3 + 9 * t) * S, ux = dx / d, uy = dy / d;
   for (const b of balls) Body.setVelocity(b, { x: b.velocity.x + ux * sp, y: b.velocity.y + uy * sp });
 }
+// --- 結果のシェア(X の投稿画面を開く) ---
+const SITE_URL = 'https://kamomutsu09-spec.github.io/gravity-merge/';
+let shareOnUp = false;
+function shareText() {
+  let t;
+  if (gameMode === 'c15') t = result > 0 ? `15チャレンジで、${fmtTime(result)}で15を作った!` : `15チャレンジ、最大${best + 1}まで届いたけど失敗…`;
+  else t = `${MODES[gameMode].label}で ${score}点!(最大 ${best + 1})`;
+  if (mine && mine.mode === gameMode && mine.pos) t += ` みんなの中で${mine.pos}位`;
+  return `重力スワイプ ${t}\n#重力スワイプ`;
+}
+function openShare() {
+  const u = `https://twitter.com/intent/tweet?text=${encodeURIComponent(shareText())}&url=${encodeURIComponent(SITE_URL)}`;
+  const w = window.open(u, '_blank');
+  if (w) w.opener = null; else location.href = u; // 開けなければ同じタブで開く
+}
 cv.addEventListener('pointerup', e => {
+  // スマホでは、指を離したとき(pointerup)だけが「ユーザーの操作」として扱われる。
+  // 音の準備と、新しいタブを開く処理はここで行う
+  audio();
+  if (shareOnUp) { shareOnUp = false; openShare(); }
   if (down && gameMode === 'zero' && mode === 'play' && !over) { flick(e); gPowTarget = 1; }
   down = null;
 });
@@ -686,7 +720,7 @@ function drawTutorial() {
 
 // 結果画面の下に、登録した場合の順位と前後の記録を出す
 function drawPreview() {
-  const y0 = H / 2 + 122, m = gameMode;
+  const y0 = H / 2 + 176, m = gameMode; // シェアボタンの段の下
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold 16px sans-serif';
   if (preview.loading) { ctx.fillStyle = '#fff8'; ctx.fillText('みんなの中での順位を確認中…', W / 2, y0); return; }
   const p = preview.pos;
