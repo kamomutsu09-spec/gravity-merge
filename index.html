@@ -68,7 +68,25 @@ let hi = 0;
 try { hi = +localStorage.getItem('gravHi') || 0; } catch (e) {}
 
 // --- 画面の状態と、ランキング(この端末のみ・上位5件) ---
-let mode = 'title'; // 'title' | 'rank' | 'play'
+let mode = 'title'; // 'notice' | 'title' | 'rank' | 'help' | 'play'
+let peek = false;   // ゲームオーバー後に「画面を見る」で盤面だけを表示中か
+let entryWas = 'none'; // 画面を見る前の名前入力欄の表示状態
+
+// ランキング仕様変更のお知らせ(以前から遊んでいる端末に1回だけ表示)
+const NOTICE_KEY = 'gravNotice1';
+const NOTICE = [
+  '1つの端末につき、最高記録1件だけが並ぶようになりました',
+  '「今日」のランキングを追加しました',
+  '登録する前に、何位になるか確認できます',
+  'これまでの記録は、同じ名前ごとにまとめました'
+];
+try {
+  if (!localStorage.getItem(NOTICE_KEY)) {
+    const returning = localStorage.getItem('gravHi') || localStorage.getItem('gravRank') || localStorage.getItem('gravName');
+    if (returning) mode = 'notice';
+    else localStorage.setItem(NOTICE_KEY, '1'); // 初めての人には出さない
+  }
+} catch (e) {}
 const RANK_N = 5;
 let rank = [], lastRank = -1;
 try { rank = JSON.parse(localStorage.getItem('gravRank') || '[]'); } catch (e) {}
@@ -199,6 +217,7 @@ function buttons() {
     { id: 'help', label: '遊び方', x, y: H * 0.5 + 128, w, h }
   ];
   if (mode === 'help') return [{ id: 'title', label: 'もどる', x, y: helpLayout().backY, w, h }];
+  if (mode === 'notice') return [{ id: 'noticeOk', label: 'OK', x, y: Math.min(H * 0.25 + 70 + NOTICE.length * 32, H - 60), w, h, on: true }];
   if (mode === 'rank') {
     const L = rankLayout(), list = [];
     if (online) {
@@ -211,13 +230,15 @@ function buttons() {
     return list;
   }
   if (over) {
-    const bw = Math.min(150, W * 0.4);
+    if (peek) return []; // 盤面を見ている間はボタンなし(どこかをタップで戻る)
+    const bw = Math.min(130, (W - 48) / 3), x0 = W / 2 - bw * 1.5 - 8;
     const list = [
-      { id: 'retry', label: 'もう一度', x: W / 2 - bw - 8, y: H / 2 + 50, w: bw, h },
-      { id: 'title', label: 'タイトルへ', x: W / 2 + 8, y: H / 2 + 50, w: bw, h }
+      { id: 'retry', label: 'もう一度', x: x0, y: H / 2 + 50, w: bw, h },
+      { id: 'title', label: 'タイトルへ', x: x0 + bw + 8, y: H / 2 + 50, w: bw, h },
+      { id: 'peek', label: '画面を見る', x: x0 + (bw + 8) * 2, y: H / 2 + 50, w: bw, h }
     ];
     // 登録が済んだら、その場でランキングを見られるボタンを出す
-    if (mine) list.push({ id: 'seeRank', label: 'ランキングを見る', x: W / 2 - bw - 8, y: H / 2 + 110, w: bw * 2 + 16, h, on: true });
+    if (mine) list.push({ id: 'seeRank', label: 'ランキングを見る', x: x0, y: H / 2 + 110, w: bw * 3 + 16, h, on: true });
     return list;
   }
   return [];
@@ -244,7 +265,7 @@ function helpLayout() {
   return { top, sp, backY: Math.min(top + HELP.length * sp + 10, H - 56) };
 }
 function startGame() {
-  hideEntry();
+  hideEntry(); peek = false;
   init();
   gTarget = { x: 0, y: 1 }; gNow = { x: 0, y: 1 }; gPow = gPowTarget = 1;
   mode = 'play';
@@ -258,7 +279,9 @@ function press(id) {
   else if (id === 'tabG') { rankTab = 'global'; loadGlobal(); }
   else if (id === 'tabD') { rankTab = 'daily'; loadGlobal(); }
   else if (id === 'tabL') rankTab = 'local';
-  else if (id === 'title') { hideEntry(); mode = 'title'; over = false; }
+  else if (id === 'title') { hideEntry(); mode = 'title'; over = false; peek = false; }
+  else if (id === 'noticeOk') { try { localStorage.setItem(NOTICE_KEY, '1'); } catch (e) {} mode = 'title'; }
+  else if (id === 'peek') { peek = true; entryWas = entry.style.display; entry.style.display = 'none'; nm.blur(); }
 }
 
 function resetState() {
@@ -357,6 +380,8 @@ function init() {
 let down = null;
 cv.addEventListener('pointerdown', e => {
   if (mode !== 'play' || over) {
+    // 盤面を見ている間は、どこをタップしてもゲームオーバー画面に戻る
+    if (over && peek) { peek = false; entry.style.display = entryWas; return; }
     const b = buttons().find(b => e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h);
     if (b) press(b.id);
     return;
@@ -446,7 +471,14 @@ function drawPreview() {
 
 function drawMenu() {
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
-  if (mode === 'title') {
+  if (mode === 'notice') {
+    ctx.font = 'bold 24px sans-serif'; ctx.fillStyle = '#ffd76a';
+    ctx.fillText('お知らせ', W / 2, H * 0.25 - 10);
+    ctx.font = 'bold 18px sans-serif'; ctx.fillStyle = '#fff';
+    ctx.fillText('ランキングが新しくなりました', W / 2, H * 0.25 + 26, W - 32);
+    ctx.font = '15px sans-serif'; ctx.fillStyle = '#fffc';
+    NOTICE.forEach((t, i) => ctx.fillText('・' + t, W / 2, H * 0.25 + 66 + i * 32, W - 32));
+  } else if (mode === 'title') {
     ctx.font = `bold ${Math.min(40, W * 0.1)}px sans-serif`;
     ctx.fillText('重力スワイプ', W / 2, H * 0.28);
     ctx.font = '15px sans-serif'; ctx.fillStyle = '#fffa';
@@ -535,7 +567,14 @@ function draw() {
     ctx.font = 'bold 30px sans-serif';
     ctx.fillText(`ボーナス +${bonusV}`, W / 2, H / 3);
   }
-  if (over) {
+  if (over && peek) {
+    // 最後の盤面をそのまま見せ、下に戻り方だけ出す
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold 15px sans-serif';
+    const t = 'タップでゲームオーバー画面に戻る', tw = ctx.measureText(t).width + 28;
+    const ty = gNow.y < -0.5 ? H - 52 : 58; // ボールが溜まる側(重力の向き)と反対に出す
+    ctx.fillStyle = '#000b'; ctx.beginPath(); ctx.roundRect(W / 2 - tw / 2, ty, tw, 34, 17); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.fillText(t, W / 2, ty + 17);
+  } else if (over) {
     ctx.fillStyle = '#000d'; ctx.fillRect(0, 0, W, H);
     ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = 'bold 32px sans-serif'; ctx.fillText('ゲームオーバー', W / 2, H / 2 - 110);
