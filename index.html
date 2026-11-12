@@ -8,25 +8,48 @@
   html,body{margin:0;height:100%;background:#12151d;overflow:hidden;overscroll-behavior:none}
   canvas{display:block;width:100%;height:100%;touch-action:none}
   #hint{position:fixed;bottom:16px;left:0;right:0;text-align:center;color:#fff6;font:14px sans-serif;pointer-events:none;transition:opacity 1s;opacity:0}
-  #entry{position:fixed;left:50%;top:calc(50% - 22px);transform:translateX(-50%);display:none;gap:8px;align-items:center;font:15px sans-serif;color:#fff}
-  #entry input{width:150px;padding:9px 10px;border-radius:10px;border:2px solid #fff6;background:#ffffff15;color:#fff;font:16px sans-serif;outline:none}
-  #entry button{padding:9px 14px;border-radius:10px;border:2px solid #ffd76a;background:#ffd76a33;color:#ffd76a;font:bold 15px sans-serif}
-  #entry button:disabled{opacity:.5}
+  #entry,#rename{position:fixed;left:50%;top:calc(50% - 22px);transform:translateX(-50%);display:none;gap:8px;align-items:center;font:15px sans-serif;color:#fff}
+  #rename{flex-wrap:wrap;justify-content:center;width:min(340px,calc(100% - 32px))}
+  #entry input,#rename input{width:150px;padding:9px 10px;border-radius:10px;border:2px solid #fff6;background:#ffffff15;color:#fff;font:16px sans-serif;outline:none}
+  #entry button,#rename button{padding:9px 14px;border-radius:10px;border:2px solid #ffd76a;background:#ffd76a33;color:#ffd76a;font:bold 15px sans-serif}
+  #rename button[type=button]{border-color:#fff6;background:#ffffff22;color:#fff}
+  #rnMsg{width:100%;text-align:center;min-height:1.2em}
+  #entry button:disabled,#rename button:disabled{opacity:.5}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="hint">スワイプした方向が「下」になる / 同じ数字がぶつかると合体 / 増えすぎたら負け</div>
+<div id="hint"></div>
 <form id="entry" autocomplete="off"><input id="nm" maxlength="10" placeholder="名前(10文字まで)"><button id="send">登録</button><span id="msg"></span></form>
+<form id="rename" autocomplete="off"><input id="rn" maxlength="10" placeholder="新しい名前(10文字まで)"><button id="rnOk">変更</button><button type="button" id="rnCancel">やめる</button><span id="rnMsg"></span></form>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
 <script>
 const { Engine, Bodies, Body, Composite } = Matter;
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 let W, H, dpr, engine, balls, walls;
 let gTarget = { x: 0, y: 1 }, gNow = { x: 0, y: 1 };
-// 重力の強さ:長くスワイプするほど少し強くなる(1倍〜G_MAX倍)
+// 重力の強さ:指を始点から遠くへ動かすほど強くなる(1倍〜G_MAX倍)
 const G_MAX = 1.5;
 let gPow = 1, gPowTarget = 1;
+
+// --- モード ---
+// normal: スコアを稼ぐ / c15: 15を作るまでのタイム(短いほど良い) / zero: 重力なし、スワイプで弾く
+const MODES = {
+  normal: { label: '通常モード', short: '通常', desc: 'スコアを稼ぐ。15が3つで +1,000,000',
+    hint: 'スワイプした方向が「下」になる / 同じ数字がぶつかると合体 / 増えすぎたら負け' },
+  c15: { label: '15チャレンジ', short: '15チャレンジ', desc: '15を作るまでのタイムを競う', time: true,
+    hint: 'できるだけ早く15を作ろう / 増えすぎたら失敗' },
+  zero: { label: 'ゼロ重力', short: 'ゼロ重力', desc: '重力なし。スワイプして離すとボールを弾く',
+    hint: '重力なし / スワイプして離すと、その方向にボールを弾く' }
+};
+const MODE_IDS = ['normal', 'c15', 'zero'];
+let gameMode = 'normal'; // 遊んでいるモード
+let rankMode = 'normal'; // ランキング画面で見ているモード
+const isTime = m => !!MODES[m].time;
+const better = (a, b, m) => isTime(m) ? a < b : a > b; // a が b より良い記録か
+// ミリ秒 → 「分:秒.1/10秒」
+const fmtTime = ms => { const t = Math.round(ms / 100); return `${Math.floor(t / 600)}:${String(Math.floor(t / 10) % 60).padStart(2, '0')}.${t % 10}`; };
+const fmtVal = (v, m) => isTime(m) ? fmtTime(v) : String(v);
 
 const MAXLV = 14;   // 0始まり。表示は1〜15
 const BONUS = 1000000; // 15が3つ繋がって消えたときのボーナス
@@ -35,7 +58,10 @@ const radiusOf = lv => 16 * S * Math.pow(1.12, lv); // 段階ごとの大きさ�
 const hueOf = lv => lv * 24;
 
 function makeBall(x, y, lv) {
-  const b = Bodies.circle(x, y, radiusOf(lv), { restitution: 0.4, friction: 0.1, density: 0.001 });
+  const b = Bodies.circle(x, y, radiusOf(lv), {
+    restitution: 0.4, friction: 0.1, density: 0.001,
+    frictionAir: gameMode === 'zero' ? 0.02 : 0.01 // ゼロ重力では空気抵抗で少しずつ止まる
+  });
   b.level = lv;
   balls.push(b); Composite.add(engine.world, b);
   return b;
@@ -55,8 +81,9 @@ function pickLevel() {
 
 function addBalls(x, y, n) {
   for (let i = 0; i < n; i++) {
-    const lv = pickLevel();
-    makeBall(x + (Math.random() - 0.5) * 30, y + (Math.random() - 0.5) * 30, lv);
+    const b = makeBall(x + (Math.random() - 0.5) * 30, y + (Math.random() - 0.5) * 30, pickLevel());
+    // ゼロ重力では止まったままにならないよう、少しだけ動きをつける
+    if (gameMode === 'zero') Body.setVelocity(b, { x: (Math.random() - 0.5) * 2 * S, y: (Math.random() - 0.5) * 2 * S });
   }
 }
 
@@ -64,10 +91,11 @@ function addBalls(x, y, n) {
 const LIMIT = 80;      // この数に達した状態が続くと終了
 const GRACE = 120;     // 猶予(約2秒 = 120ステップ)
 let over, ticks, nextSpawn, full, merges, best, score, bonusT = 0, bonusV = 0;
+let result = 0; // 記録する値(ノーマル/ゼロ重力 = スコア、15チャレンジ = タイム[ms])。記録なしは 0
 let hi = 0;
 try { hi = +localStorage.getItem('gravHi') || 0; } catch (e) {}
 
-// --- 画面の状態と、ランキング(この端末のみ・上位5件) ---
+// --- 画面の状態 ---
 let mode = 'title'; // 'notice' | 'title' | 'rank' | 'help' | 'play'
 let peek = false;   // ゲームオーバー後に「画面を見る」で盤面だけを表示中か
 let entryWas = 'none'; // 画面を見る前の名前入力欄の表示状態
@@ -87,23 +115,31 @@ try {
     else localStorage.setItem(NOTICE_KEY, '1'); // 初めての人には出さない
   }
 } catch (e) {}
+
+// --- この端末のランキング(モードごとに上位5件) ---
 const RANK_N = 5;
-let rank = [], lastRank = -1;
-try { rank = JSON.parse(localStorage.getItem('gravRank') || '[]'); } catch (e) {}
-if (!Array.isArray(rank)) rank = [];
-if (!rank.length && hi > 0) rank = [{ s: hi, d: Date.now() }]; // 旧ハイスコアを引き継ぐ
-function recordScore() {
+const rankKey = m => m === 'normal' ? 'gravRank' : 'gravRank_' + m;
+const ranks = {};
+for (const m of MODE_IDS) {
+  let r = [];
+  try { r = JSON.parse(localStorage.getItem(rankKey(m)) || '[]'); } catch (e) {}
+  ranks[m] = Array.isArray(r) ? r : [];
+}
+if (!ranks.normal.length && hi > 0) ranks.normal = [{ s: hi, d: Date.now() }]; // 旧ハイスコアを引き継ぐ
+const localBest = m => ranks[m].length ? ranks[m][0].s : 0;
+let lastRank = -1;
+function recordResult() {
   lastRank = -1;
-  if (score <= 0) return;
-  const mine = { s: score, d: Date.now() };
-  rank.push(mine);
-  rank.sort((a, b) => b.s - a.s);
-  rank = rank.slice(0, RANK_N);
-  lastRank = rank.indexOf(mine);
-  hi = Math.max(hi, score);
+  if (!(result > 0)) return;
+  const m = gameMode, me = { s: result, d: Date.now() };
+  ranks[m].push(me);
+  ranks[m].sort((a, b) => isTime(m) ? a.s - b.s : b.s - a.s);
+  ranks[m] = ranks[m].slice(0, RANK_N);
+  lastRank = ranks[m].indexOf(me);
+  if (m === 'normal') hi = Math.max(hi, result);
   try {
-    localStorage.setItem('gravRank', JSON.stringify(rank));
-    localStorage.setItem('gravHi', hi);
+    localStorage.setItem(rankKey(m), JSON.stringify(ranks[m]));
+    if (m === 'normal') localStorage.setItem('gravHi', hi);
   } catch (e) {}
 }
 const fmtDate = t => { const d = new Date(t); return `${d.getMonth() + 1}/${d.getDate()}`; };
@@ -137,19 +173,19 @@ async function rpc(fn, args) {
   return r.json();
 }
 async function loadGlobal() {
-  const tab = rankTab;
+  const tab = rankTab, md = rankMode;
   gState = 'loading';
   try {
-    const data = await rpc('top_scores', { since: tab === 'daily' ? todayStart() : null, n: G_N, me: deviceId });
-    if (rankTab !== tab) return; // 読み込み中にタブが切り替わったら捨てる
+    const data = await rpc('top_scores', { since: tab === 'daily' ? todayStart() : null, n: G_N, me: deviceId, md });
+    if (rankTab !== tab || rankMode !== md) return; // 読み込み中に切り替わったら捨てる
     gRank = data; gState = 'ok';
-  } catch (e) { if (rankTab === tab) gState = 'err'; }
+  } catch (e) { if (rankTab === tab && rankMode === md) gState = 'err'; }
 }
-async function submitScore(name, s) {
+async function submitScore(name, v) {
   const r = await fetch(`${SB_URL}/rest/v1/scores`, {
     method: 'POST',
     headers: { apikey: SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify({ name, score: s, device_id: deviceId })
+    body: JSON.stringify({ name, score: v, device_id: deviceId, mode: gameMode })
   });
   if (!r.ok) throw new Error(r.status);
 }
@@ -162,27 +198,27 @@ function openRank() {
 const entry = document.getElementById('entry'), nm = document.getElementById('nm');
 const sendBtn = document.getElementById('send'), msg = document.getElementById('msg');
 try { nm.value = localStorage.getItem('gravName') || ''; } catch (e) {}
-// 自分が登録した記録 { name, s, pos, dpos, best }
-// pos = みんなの中、dpos = 今日の中での順位(取れなければ 0)、best = 登録前の自己ベスト
+// 自分が登録した記録 { name, s, pos, dpos, best, mode }
+// pos = みんなの中、dpos = 今日の中での順位(取れなければ 0)、best = 登録前の自己ベスト(なければ 0)
 let mine = null;
-// スコア s を登録したら何位か(自己ベストの方が高ければ自己ベストで計算)
+// 値 v を登録したら何位か(自己ベストの方が良ければ自己ベストで計算)
 // 返り値 { pos, best, above, below } または null(失敗時)
-async function rankPreview(s, daily) {
-  try { return await rpc('rank_preview', { sc: s, since: daily ? todayStart() : null, me: deviceId }); }
+async function rankPreview(v, daily) {
+  try { return await rpc('rank_preview', { sc: v, since: daily ? todayStart() : null, me: deviceId, md: gameMode }); }
   catch (e) { return null; }
 }
 // 登録前のプレビュー:{ loading } または { pos, dpos, best, above, below }
 let preview = null;
-async function loadPreview(s) {
+async function loadPreview(v) {
   preview = { loading: true };
-  const [all, day] = await Promise.all([rankPreview(s), rankPreview(s, true)]);
-  if (!over || s !== score) return; // 次のゲームが始まっていたら捨てる
+  const [all, day] = await Promise.all([rankPreview(v), rankPreview(v, true)]);
+  if (!over || v !== result) return; // 次のゲームが始まっていたら捨てる
   preview = all ? { pos: all.pos, dpos: day ? day.pos : 0, best: all.best || 0, above: all.above, below: all.below } : null;
 }
 function showEntry() {
   mine = null; preview = null;
-  if (!online || score <= 0) return;
-  loadPreview(score);
+  if (!online || !(result > 0)) return;
+  loadPreview(result);
   nm.style.display = sendBtn.style.display = ''; sendBtn.disabled = false; msg.textContent = '';
   entry.style.display = 'flex';
 }
@@ -194,41 +230,85 @@ entry.addEventListener('submit', async e => {
   try { localStorage.setItem('gravName', name); } catch (e) {}
   sendBtn.disabled = true; msg.textContent = '送信中…';
   try {
+    const m = gameMode, v = result;
     const best = preview && !preview.loading ? preview.best : 0; // 登録前の自己ベスト
-    await submitScore(name, score);
+    await submitScore(name, v);
     nm.style.display = sendBtn.style.display = 'none'; nm.blur();
     msg.textContent = 'みんなのランキングに登録しました!';
-    const [all, day] = await Promise.all([rankPreview(score), rankPreview(score, true)]);
+    const [all, day] = await Promise.all([rankPreview(v), rankPreview(v, true)]);
     const pos = all ? all.pos : 0, dpos = day ? day.pos : 0;
-    mine = { name, s: score, pos, dpos, best };
-    if (pos) msg.textContent = (best > score ? `自己ベスト ${best} のまま ` : '登録しました!')
+    mine = { name, s: v, pos, dpos, best, mode: m };
+    if (pos) msg.textContent = (best && better(best, v, m) ? `自己ベスト ${fmtVal(best, m)} のまま ` : '登録しました!')
       + `みんなの中で ${pos}位${dpos ? `・今日 ${dpos}位` : ''}`;
   } catch (err) {
     sendBtn.disabled = false; msg.textContent = '送信できませんでした';
   }
 });
 
-// 画面上のボタン(キャンバスに描いて、タップ位置で判定する)
+// --- 名前の変更(この端末で登録した記録すべての名前を変える) ---
+const renameForm = document.getElementById('rename'), rn = document.getElementById('rn');
+const rnOk = document.getElementById('rnOk'), rnMsg = document.getElementById('rnMsg');
+function openRename() {
+  mode = 'rename';
+  rn.value = nm.value.trim(); rnMsg.textContent = ''; rnOk.disabled = false;
+  renameForm.style.display = 'flex';
+}
+function closeRename() { renameForm.style.display = 'none'; rn.blur(); }
+document.getElementById('rnCancel').addEventListener('click', () => { closeRename(); openRank(); });
+renameForm.addEventListener('submit', async e => {
+  e.preventDefault();
+  const name = rn.value.trim().slice(0, 10);
+  if (!name) { rnMsg.textContent = '名前を入れてね'; return; }
+  rnOk.disabled = true; rnMsg.textContent = '変更中…';
+  try {
+    const n = await rpc('rename_me', { me: deviceId, new_name: name });
+    nm.value = name; // 次に登録するときの名前もそろえる
+    try { localStorage.setItem('gravName', name); } catch (e) {}
+    if (mine) mine.name = name;
+    if (!n) { rnOk.disabled = false; rnMsg.textContent = 'この端末で登録した記録がまだありません'; return; }
+    closeRename(); openRank();
+  } catch (err) {
+    rnOk.disabled = false; rnMsg.textContent = '変更できませんでした';
+  }
+});
+
+// --- 画面上のボタン(キャンバスに描いて、タップ位置で判定する) ---
+// モード選択画面の配置(横画面でも収まるように間隔を調整)
+function selectLayout() {
+  const top = 84, sp = Math.max(70, Math.min(100, (H - top - 76) / MODE_IDS.length));
+  return { top, sp, h: Math.min(60, sp - 26), backY: Math.min(top + MODE_IDS.length * sp + 4, H - 56) };
+}
 function buttons() {
   const w = Math.min(240, W * 0.7), h = 48, x = W / 2 - w / 2;
   if (mode === 'title') return [
-    { id: 'start', label: 'スタート', x, y: H * 0.5, w, h },
+    { id: 'select', label: 'モード選択', x, y: H * 0.5, w, h, on: true },
     { id: 'rank', label: 'ランキング', x, y: H * 0.5 + 64, w, h },
     { id: 'help', label: '遊び方', x, y: H * 0.5 + 128, w, h }
   ];
+  if (mode === 'select') {
+    const L = selectLayout(), bw = Math.min(280, W - 48);
+    const list = MODE_IDS.map((m, i) => ({ id: 'm_' + m, label: MODES[m].label, x: W / 2 - bw / 2, y: L.top + i * L.sp, w: bw, h: L.h, fs: 20 }));
+    list.push({ id: 'title', label: 'もどる', x, y: L.backY, w, h });
+    return list;
+  }
   if (mode === 'help') return [{ id: 'title', label: 'もどる', x, y: helpLayout().backY, w, h }];
   if (mode === 'notice') return [{ id: 'noticeOk', label: 'OK', x, y: Math.min(H * 0.25 + 70 + NOTICE.length * 32, H - 60), w, h, on: true }];
   if (mode === 'rank') {
     const L = rankLayout(), list = [];
+    const mw = Math.min(110, (W - 48) / 3), mx = W / 2 - mw * 1.5 - 8;
+    MODE_IDS.forEach((m, i) => list.push({ id: 'rm_' + m, label: MODES[m].short, x: mx + i * (mw + 8), y: 60, w: mw, h: 34, fs: 14, on: rankMode === m }));
     if (online) {
-      const tw = Math.min(100, (W - 48) / 3);
-      list.push({ id: 'tabG', label: 'みんな', x: W / 2 - tw * 1.5 - 8, y: 66, w: tw, h: 36, on: rankTab === 'global' });
-      list.push({ id: 'tabD', label: '今日', x: W / 2 - tw / 2, y: 66, w: tw, h: 36, on: rankTab === 'daily' });
-      list.push({ id: 'tabL', label: 'この端末', x: W / 2 + tw / 2 + 8, y: 66, w: tw, h: 36, on: rankTab === 'local' });
-    }
-    list.push({ id: 'title', label: 'もどる', x, y: L.backY, w, h });
+      const tw = Math.min(100, (W - 48) / 3), tx = W / 2 - tw * 1.5 - 8;
+      [['tabG', 'みんな', 'global'], ['tabD', '今日', 'daily'], ['tabL', 'この端末', 'local']].forEach(([id, label, t], i) =>
+        list.push({ id, label, x: tx + i * (tw + 8), y: 102, w: tw, h: 34, fs: 14, on: rankTab === t }));
+      // もどる と 名前の変更 を横に並べる
+      const bw = Math.min(150, (W - 40) / 2);
+      list.push({ id: 'title', label: 'もどる', x: W / 2 - bw - 4, y: L.backY, w: bw, h });
+      list.push({ id: 'renameBtn', label: '名前を変更', x: W / 2 + 4, y: L.backY, w: bw, h, fs: 16 });
+    } else list.push({ id: 'title', label: 'もどる', x, y: L.backY, w, h });
     return list;
   }
+  if (mode === 'rename') return []; // 入力欄はHTMLのフォーム
   if (over) {
     if (peek) return []; // 盤面を見ている間はボタンなし(どこかをタップで戻る)
     const bw = Math.min(130, (W - 48) / 3), x0 = W / 2 - bw * 1.5 - 8;
@@ -243,10 +323,12 @@ function buttons() {
   }
   return [];
 }
-const setHint = v => { document.getElementById('hint').style.opacity = v; };
-// ランキング画面の行の位置(横画面でも収まるように行間を縮める)
+const hintEl = document.getElementById('hint');
+const setHint = v => { hintEl.style.opacity = v; };
+// ランキング画面の行の位置(横画面でも収まるように行数と行間を調整)
 function rankLayout() {
-  const top = online ? 120 : 76, n = isOnlineTab() ? G_N : RANK_N;
+  const top = online ? 152 : 110, nMax = isOnlineTab() ? G_N : RANK_N;
+  const n = Math.max(3, Math.min(nMax, Math.floor((H - top - 96) / 18)));
   const sp = Math.max(18, Math.min(30, (H - top - 96) / n));
   // リストの下に「あなた: ○位」の1行ぶん空けて、もどるボタンを置く
   return { top, n, sp, noteY: top + n * sp + 16, backY: Math.min(top + n * sp + 36, H - 56) };
@@ -256,9 +338,10 @@ const HELP = [
   'スワイプした方向が「下」になり、ボールが流れる',
   '指を始点から遠くへ動かすほど、重力が強くなる',
   '同じ数字がぶつかると、次の数字に合体(最大15)',
-  '大きい数字を作るほど高得点',
-  '15が3つくっつくと消えて +1,000,000',
-  'ボールが80個以上の状態が2秒続くとゲームオーバー'
+  'ボールが80個以上の状態が2秒続くとゲームオーバー',
+  '【通常モード】スコアを稼ぐ。15が3つくっつくと +1,000,000',
+  '【15チャレンジ】15を作るまでのタイムを競う',
+  '【ゼロ重力】重力なし。スワイプして離すと、その方向にボールを弾く'
 ];
 function helpLayout() {
   const top = 90, sp = Math.max(24, Math.min(40, (H - top - 70) / HELP.length));
@@ -269,13 +352,18 @@ function startGame() {
   init();
   gTarget = { x: 0, y: 1 }; gNow = { x: 0, y: 1 }; gPow = gPowTarget = 1;
   mode = 'play';
+  hintEl.textContent = MODES[gameMode].hint;
   setHint(1);
 }
 function press(id) {
-  if (id === 'start' || id === 'retry') startGame();
-  else if (id === 'rank') openRank();
+  if (id.startsWith('m_')) { gameMode = id.slice(2); startGame(); }
+  else if (id.startsWith('rm_')) { rankMode = id.slice(3); if (online && isOnlineTab()) loadGlobal(); }
+  else if (id === 'retry') startGame();
+  else if (id === 'rank') { rankMode = gameMode; openRank(); }
   else if (id === 'help') mode = 'help';
-  else if (id === 'seeRank') { hideEntry(); rankTab = 'global'; openRank(); }
+  else if (id === 'select') mode = 'select';
+  else if (id === 'renameBtn') openRename();
+  else if (id === 'seeRank') { hideEntry(); rankMode = gameMode; rankTab = 'global'; openRank(); }
   else if (id === 'tabG') { rankTab = 'global'; loadGlobal(); }
   else if (id === 'tabD') { rankTab = 'daily'; loadGlobal(); }
   else if (id === 'tabL') rankTab = 'local';
@@ -285,7 +373,16 @@ function press(id) {
 }
 
 function resetState() {
-  over = false; ticks = 0; nextSpawn = 30; full = 0; merges = 0; best = 0; score = 0; bonusT = 0;
+  over = false; ticks = 0; nextSpawn = 30; full = 0; merges = 0; best = 0; score = 0; bonusT = 0; result = 0;
+}
+
+// ゲーム終了。ok = 15チャレンジで15を作れたか
+function finish(ok) {
+  if (over) return;
+  over = true;
+  if (gameMode === 'c15') result = ok ? Math.round(ticks * 1000 / 60) : 0; // 時間はステップ数から計算(処理落ちの影響を受けない)
+  else result = score;
+  recordResult(); setHint(0); showEntry();
 }
 
 // 最大段階(15)のボールが3つ以上くっついていたら、まとめて消してボーナス
@@ -328,6 +425,7 @@ function onCollide(ev) {
     nb.pop = 1; // 合体時の演出用
     merges++; best = Math.max(best, lv);
     score += 10 * Math.pow(2, lv); // 大きい数字ほど指数的に高得点
+    if (gameMode === 'c15' && lv === MAXLV) finish(true); // 15ができたらクリア
   }
 }
 
@@ -380,7 +478,7 @@ function init() {
 let down = null;
 cv.addEventListener('pointerdown', e => {
   if (mode !== 'play' || over) {
-    // 盤面を見ている間は、どこをタップしてもゲームオーバー画面に戻る
+    // 盤面を見ている間は、どこをタップしても結果画面に戻る
     if (over && peek) { peek = false; entry.style.display = entryWas; return; }
     const b = buttons().find(b => e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h);
     if (b) press(b.id);
@@ -390,15 +488,24 @@ cv.addEventListener('pointerdown', e => {
 });
 cv.addEventListener('pointermove', e => {
   if (!down) return;
-  // 開始点から今の指の位置まで:向き = 重力の向き、距離 = 重力の強さ(戻せば弱まる)
+  // 開始点から今の指の位置まで:向き = 重力(ゼロ重力では弾く)の向き、距離 = 強さ(戻せば弱まる)
   const dx = e.clientX - down.x, dy = e.clientY - down.y, d = Math.hypot(dx, dy);
   if (d > 8) gTarget = { x: dx / d, y: dy / d }; // 開始点のすぐ近くでは向きを変えない
   // 画面の短辺の6割ほど離れると最大の強さ
   gPowTarget = 1 + (G_MAX - 1) * Math.min(1, d / (Math.min(W, H) * 0.6));
-  document.getElementById('hint').style.opacity = 0;
+  setHint(0);
 });
-function end() { down = null; }
-cv.addEventListener('pointerup', end);
+// ゼロ重力:指を離した瞬間に、すべてのボールをスワイプの方向へ弾く
+function flick(e) {
+  const dx = e.clientX - down.x, dy = e.clientY - down.y, d = Math.hypot(dx, dy);
+  if (d <= 8) return;
+  const t = Math.min(1, d / (Math.min(W, H) * 0.6)), sp = (3 + 9 * t) * S, ux = dx / d, uy = dy / d;
+  for (const b of balls) Body.setVelocity(b, { x: b.velocity.x + ux * sp, y: b.velocity.y + uy * sp });
+}
+cv.addEventListener('pointerup', e => {
+  if (down && gameMode === 'zero' && mode === 'play' && !over) { flick(e); gPowTarget = 1; }
+  down = null;
+});
 cv.addEventListener('pointercancel', () => { down = null; });
 addEventListener('resize', onResize);
 
@@ -412,21 +519,20 @@ function loop(now) {
     // 自動でボールが降る(時間とともに間隔が短くなる)
     if (ticks >= nextSpawn) {
       addBalls(W * (0.15 + Math.random() * 0.7), H * (0.15 + Math.random() * 0.7), 1);
-      nextSpawn = ticks + Math.max(10, 24 - ticks / 60);
+      // ゼロ重力はボールが集まらず合体しにくいので、降る間隔を1.5倍に
+      nextSpawn = ticks + Math.max(10, 24 - ticks / 60) * (gameMode === 'zero' ? 1.5 : 1);
     }
     // 満杯の状態が続いたら終了
     full = balls.length >= LIMIT ? full + 1 : 0;
-    if (full >= GRACE) {
-      over = true;
-      recordScore(); setHint(0); showEntry();
-    }
-    // 重力の向きをなめらかに切り替える
+    if (full >= GRACE) finish(false);
+    // 重力の向きをなめらかに切り替える(ゼロ重力では矢印の表示にだけ使う)
     gNow.x += (gTarget.x - gNow.x) * 0.15;
     gNow.y += (gTarget.y - gNow.y) * 0.15;
     gPow += (gPowTarget - gPow) * 0.15;
-    engine.gravity.x = gNow.x * gPow; engine.gravity.y = gNow.y * gPow;
+    if (gameMode === 'zero') { engine.gravity.x = 0; engine.gravity.y = 0; }
+    else { engine.gravity.x = gNow.x * gPow; engine.gravity.y = gNow.y * gPow; }
     Engine.update(engine, 1000 / 60);
-    checkTriple();
+    if (gameMode === 'normal' || gameMode === 'zero') checkTriple();
     if (bonusT > 0) bonusT--;
     acc -= 1000 / 60;
   }
@@ -435,28 +541,30 @@ function loop(now) {
 }
 
 function drawButtons() {
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold 18px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   for (const b of buttons()) {
     ctx.fillStyle = b.on ? '#ffd76a33' : '#ffffff22'; ctx.strokeStyle = b.on ? '#ffd76a' : '#fff6'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 12); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = '#fff'; ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 1);
+    ctx.font = `bold ${b.fs || 18}px sans-serif`;
+    ctx.fillStyle = '#fff'; ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 1, b.w - 8);
   }
 }
 
-// ゲームオーバー画面の下に、登録した場合の順位と前後の記録を出す
+// 結果画面の下に、登録した場合の順位と前後の記録を出す
 function drawPreview() {
-  const y0 = H / 2 + 122;
+  const y0 = H / 2 + 122, m = gameMode;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold 16px sans-serif';
   if (preview.loading) { ctx.fillStyle = '#fff8'; ctx.fillText('みんなの中での順位を確認中…', W / 2, y0); return; }
-  const p = preview.pos, keep = preview.best > score; // keep = 自己ベストに届かず、順位は自己ベストのまま
+  const p = preview.pos;
+  const keep = preview.best && better(preview.best, result, m); // 自己ベストに届かず、順位は自己ベストのまま
   const day = preview.dpos ? `・今日 ${preview.dpos}位` : '';
   ctx.fillStyle = '#ffd76a';
-  ctx.fillText(keep ? `自己ベスト ${preview.best} で みんなの中で ${p}位のまま${day}`
+  ctx.fillText(keep ? `自己ベスト ${fmtVal(preview.best, m)} で みんなの中で ${p}位のまま${day}`
                     : `登録すると みんなの中で ${p}位${day}`, W / 2, y0, W - 32);
   if (H < 600) return; // 横画面など高さが足りないときは1行だけ
   const rows = [];
   if (preview.above) rows.push({ rank: p - 1, name: preview.above.name, s: preview.above.score });
-  rows.push({ rank: p, name: nm.value.trim() || 'あなた', s: Math.max(score, preview.best), me: true });
+  rows.push({ rank: p, name: nm.value.trim() || 'あなた', s: keep ? preview.best : result, me: true });
   if (preview.below) rows.push({ rank: p + 1, name: preview.below.name, s: preview.below.score });
   ctx.font = '15px sans-serif';
   rows.forEach((r, i) => {
@@ -465,7 +573,7 @@ function drawPreview() {
     ctx.fillStyle = r.me ? '#ffd76a' : '#fffa';
     ctx.textAlign = 'left'; ctx.fillText(`${r.rank}位`, W / 2 - 150, y);
     ctx.fillText(r.name, W / 2 - 100, y, 110);
-    ctx.textAlign = 'right'; ctx.fillText(`${r.s}`, W / 2 + 105, y);
+    ctx.textAlign = 'right'; ctx.fillText(fmtVal(r.s, m), W / 2 + 105, y);
   });
 }
 
@@ -482,8 +590,23 @@ function drawMenu() {
     ctx.font = `bold ${Math.min(40, W * 0.1)}px sans-serif`;
     ctx.fillText('重力スワイプ', W / 2, H * 0.28);
     ctx.font = '15px sans-serif'; ctx.fillStyle = '#fffa';
-    ctx.fillText('スワイプで重力を変えて、同じ数字を合体させよう', W / 2, H * 0.28 + 44);
-    ctx.fillText(`ハイスコア ${hi}`, W / 2, H * 0.28 + 72);
+    ctx.fillText('スワイプで重力を変えて、同じ数字を合体させよう', W / 2, H * 0.28 + 44, W - 32);
+  } else if (mode === 'select') {
+    ctx.font = 'bold 26px sans-serif';
+    ctx.fillText('モード選択', W / 2, 42);
+    // 各モードの説明と、この端末での自己ベスト
+    ctx.font = '13px sans-serif'; ctx.fillStyle = '#fffa';
+    buttons().filter(b => b.id.startsWith('m_')).forEach(b => {
+      const m = b.id.slice(2), v = localBest(m);
+      const rec = v ? `${isTime(m) ? 'ベスト' : '最高'} ${fmtVal(v, m)}` : '記録なし';
+      ctx.fillText(`${MODES[m].desc} ・ ${rec}`, W / 2, b.y + b.h + 13, W - 32);
+    });
+  } else if (mode === 'rename') {
+    ctx.font = 'bold 26px sans-serif';
+    ctx.fillText('名前の変更', W / 2, H / 2 - 110);
+    ctx.font = '14px sans-serif'; ctx.fillStyle = '#fffa';
+    ctx.fillText('この端末で登録した記録すべて(全モード)の', W / 2, H / 2 - 70, W - 32);
+    ctx.fillText('名前が変わります', W / 2, H / 2 - 50, W - 32);
   } else if (mode === 'help') {
     ctx.font = 'bold 28px sans-serif';
     ctx.fillText('遊び方', W / 2, 40);
@@ -491,22 +614,21 @@ function drawMenu() {
     ctx.font = `${Math.min(16, L.sp * 0.6)}px sans-serif`;
     HELP.forEach((t, i) => ctx.fillText(t, W / 2, L.top + i * L.sp + L.sp / 2, W - 32));
   } else {
-    ctx.font = 'bold 28px sans-serif';
-    ctx.fillText('ランキング', W / 2, 40);
-    const L = rankLayout(), fs = Math.min(18, L.sp * 0.65);
+    ctx.font = 'bold 26px sans-serif';
+    ctx.fillText('ランキング', W / 2, 32);
+    const L = rankLayout(), fs = Math.min(18, L.sp * 0.65), m = rankMode;
     const net = isOnlineTab();
-    const rows = net
+    const rows = (net
       ? gRank.map(r => ({ name: r.name, s: r.score, d: Date.parse(r.created_at), me: r.mine }))
-      : rank.map(r => ({ name: '', s: r.s, d: r.d }));
+      : ranks[m].map(r => ({ name: '', s: r.s, d: r.d }))).slice(0, L.n);
     let note = '';
     if (net && gState === 'loading') note = '読み込み中…';
     else if (net && gState === 'err') note = '読み込めませんでした';
     else if (!rows.length) note = rankTab === 'daily' ? '今日の記録はまだありません' : 'まだ記録がありません';
     if (note) { ctx.font = '18px sans-serif'; ctx.fillStyle = '#fff8'; ctx.fillText(note, W / 2, L.top + 30); }
-    // 自分が今回登録した記録(みんな・今日タブ)
-    // この端末の記録は、DBが返す mine フラグで強調する
+    // この端末の記録は、DBが返す mine フラグで強調する。圏外なら今回の順位をリストの下に出す
     const myIdx = net ? rows.findIndex(r => r.me) : -1;
-    const myPos = mine ? (rankTab === 'daily' ? mine.dpos : mine.pos) : 0;
+    const myPos = mine && mine.mode === m ? (rankTab === 'daily' ? mine.dpos : mine.pos) : 0;
     if (!note && net && myPos && myIdx < 0) {
       ctx.textAlign = 'center'; ctx.font = `${fs}px sans-serif`; ctx.fillStyle = '#ffd76a';
       ctx.fillText(`あなた: ${myPos}位`, W / 2, L.noteY);
@@ -518,7 +640,7 @@ function drawMenu() {
       ctx.fillStyle = i === 0 ? '#ffd76a' : '#fff';
       ctx.textAlign = 'left'; ctx.fillText(`${i + 1}位`, W / 2 - 150, y);
       ctx.fillText(r.name, W / 2 - 100, y, 110); // 長い名前は横に縮めて収める
-      ctx.textAlign = 'right'; ctx.fillText(`${r.s}`, W / 2 + 105, y);
+      ctx.textAlign = 'right'; ctx.fillText(fmtVal(r.s, m), W / 2 + 105, y);
       ctx.fillStyle = '#fff6'; ctx.font = `${fs * 0.8}px sans-serif`; ctx.fillText(fmtDate(r.d), W / 2 + 150, y);
     });
   }
@@ -537,26 +659,36 @@ function draw() {
     ctx.font = `bold ${Math.max(9, r * (b.level >= 9 ? 0.75 : 0.9))}px sans-serif`;
     ctx.fillText(b.level + 1, b.position.x, b.position.y + 1);
   }
-  // 重力の向きを示す矢印
-  // 重力の強さ(1〜G_MAX)を 0〜1 にして、矢印の長さ・太さ・濃さに反映
-  const t = Math.max(0, Math.min(1, (gPow - 1) / (G_MAX - 1)));
-  const cx = W / 2, cy = H / 2, L = (25 + 40 * t) * S; // 半分の長さ。全長は弱い時50px〜強い時130px(標準画面)
-  const m = Math.hypot(gNow.x, gNow.y) || 1, ux = gNow.x / m, uy = gNow.y / m;
-  ctx.strokeStyle = `rgba(255,255,255,${0.2 + 0.25 * t})`; ctx.lineWidth = 3 + 2 * t; ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(cx - ux * L, cy - uy * L); ctx.lineTo(cx + ux * L, cy + uy * L);
-  ctx.moveTo(cx + ux * L, cy + uy * L); ctx.lineTo(cx + ux * L - ux * 12 + uy * 8, cy + uy * L - uy * 12 - ux * 8);
-  ctx.moveTo(cx + ux * L, cy + uy * L); ctx.lineTo(cx + ux * L - ux * 12 - uy * 8, cy + uy * L - uy * 12 + ux * 8);
-  ctx.stroke();
+  // 重力の向きを示す矢印(ゼロ重力では、スワイプ中だけ弾く向きと強さを表示)
+  if (gameMode !== 'zero' || down) {
+    // 強さ(1〜G_MAX)を 0〜1 にして、矢印の長さ・太さ・濃さに反映
+    const t = Math.max(0, Math.min(1, (gPow - 1) / (G_MAX - 1)));
+    const cx = W / 2, cy = H / 2, L = (25 + 40 * t) * S; // 半分の長さ。全長は弱い時50px〜強い時130px(標準画面)
+    const m = Math.hypot(gNow.x, gNow.y) || 1, ux = gNow.x / m, uy = gNow.y / m;
+    ctx.strokeStyle = `rgba(255,255,255,${0.2 + 0.25 * t})`; ctx.lineWidth = 3 + 2 * t; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(cx - ux * L, cy - uy * L); ctx.lineTo(cx + ux * L, cy + uy * L);
+    ctx.moveTo(cx + ux * L, cy + uy * L); ctx.lineTo(cx + ux * L - ux * 12 + uy * 8, cy + uy * L - uy * 12 - ux * 8);
+    ctx.moveTo(cx + ux * L, cy + uy * L); ctx.lineTo(cx + ux * L - ux * 12 - uy * 8, cy + uy * L - uy * 12 + ux * 8);
+    ctx.stroke();
+  }
 
   // HUD
   const warn = balls.length >= LIMIT * 0.8;
   ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.font = 'bold 16px sans-serif';
   ctx.fillStyle = warn ? '#ff6b6b' : '#fffa';
   ctx.fillText(`数 ${balls.length}/${LIMIT}`, 12, 12);
-  ctx.fillStyle = '#fffa';
+  ctx.fillStyle = '#fff6'; ctx.font = 'bold 13px sans-serif';
+  ctx.fillText(MODES[gameMode].label, 12, 34);
+  ctx.fillStyle = '#fffa'; ctx.font = 'bold 16px sans-serif';
   ctx.textAlign = 'right';
-  ctx.fillText(`スコア ${score}`, W - 12, 12);
-  ctx.fillText(`最大 ${best + 1} / ハイ ${Math.max(hi, score)}`, W - 12, 34);
+  if (isTime(gameMode)) {
+    const b = localBest(gameMode);
+    ctx.fillText(`タイム ${fmtTime(ticks * 1000 / 60)}`, W - 12, 12);
+    ctx.fillText(`最大 ${best + 1} / ベスト ${b ? fmtTime(b) : '-'}`, W - 12, 34);
+  } else {
+    ctx.fillText(`スコア ${score}`, W - 12, 12);
+    ctx.fillText(`最大 ${best + 1} / ハイ ${Math.max(localBest(gameMode), score)}`, W - 12, 34);
+  }
   if (full > 0 && !over) {
     ctx.fillStyle = `rgba(255,80,80,${0.15 + 0.15 * Math.sin(full / 4)})`;
     ctx.fillRect(0, 0, W, H);
@@ -568,18 +700,27 @@ function draw() {
     ctx.fillText(`ボーナス +${bonusV}`, W / 2, H / 3);
   }
   if (over && peek) {
-    // 最後の盤面をそのまま見せ、下に戻り方だけ出す
+    // 最後の盤面をそのまま見せ、戻り方だけ出す
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold 15px sans-serif';
-    const t = 'タップでゲームオーバー画面に戻る', tw = ctx.measureText(t).width + 28;
+    const t = 'タップで結果画面に戻る', tw = ctx.measureText(t).width + 28;
     const ty = gNow.y < -0.5 ? H - 52 : 58; // ボールが溜まる側(重力の向き)と反対に出す
     ctx.fillStyle = '#000b'; ctx.beginPath(); ctx.roundRect(W / 2 - tw / 2, ty, tw, 34, 17); ctx.fill();
     ctx.fillStyle = '#fff'; ctx.fillText(t, W / 2, ty + 17);
   } else if (over) {
+    // 結果画面
+    let head = 'ゲームオーバー', line = `スコア ${score}${lastRank === 0 ? '(ハイスコア!)' : ''}`, gold = false;
+    if (gameMode === 'c15') {
+      if (result > 0) { head = '15達成!'; gold = true; line = `タイム ${fmtTime(result)}${lastRank === 0 ? '(自己ベスト!)' : ''}`; }
+      else { head = 'しっぱい…'; line = `15まで届きませんでした(最大 ${best + 1})`; }
+    }
     ctx.fillStyle = '#000d'; ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.font = 'bold 32px sans-serif'; ctx.fillText('ゲームオーバー', W / 2, H / 2 - 110);
-    ctx.font = '18px sans-serif';
-    ctx.fillText(`スコア ${score}${lastRank === 0 ? '(ハイスコア!)' : ''}`, W / 2, H / 2 - 70);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold 14px sans-serif'; ctx.fillStyle = '#fff8';
+    ctx.fillText(MODES[gameMode].label, W / 2, H / 2 - 142);
+    ctx.font = 'bold 32px sans-serif'; ctx.fillStyle = gold ? '#ffd76a' : '#fff';
+    ctx.fillText(head, W / 2, H / 2 - 110);
+    ctx.font = '18px sans-serif'; ctx.fillStyle = '#fff';
+    ctx.fillText(line, W / 2, H / 2 - 70, W - 32);
     if (lastRank >= 0) ctx.fillText(`この端末で ${lastRank + 1}位`, W / 2, H / 2 - 44);
     drawButtons();
     if (!mine && preview) drawPreview();
