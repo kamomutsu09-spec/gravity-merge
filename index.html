@@ -221,6 +221,21 @@ if (!deviceId) {
     : 'xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx'.replace(/x/g, () => (Math.random() * 16 | 0).toString(16));
   try { localStorage.setItem('gravDevice', deviceId); } catch (e) {}
 }
+// 失敗したとき、DBが返すエラーの文言(例 'ng name')を取り出して投げる
+async function fail(r) {
+  let m = String(r.status);
+  try { const j = await r.json(); if (j && j.message) m = j.message; } catch (e) {}
+  throw new Error(m);
+}
+// DBが拒否した理由を、画面に出す文に変える
+function reasonText(err, fallback) {
+  const m = String(err && err.message || '');
+  if (m.includes('ng name')) return 'その名前は使えません';
+  if (m.includes('too many')) return '少し待ってからもう一度どうぞ';
+  if (m.includes('too fast')) return 'この記録は登録できません';
+  if (m.includes('scores_name_check') || m.includes('invalid name')) return '名前は1〜10文字にしてね';
+  return fallback;
+}
 // DBの関数(RPC)を呼ぶ
 async function rpc(fn, args) {
   const r = await fetch(`${SB_URL}/rest/v1/rpc/${fn}`, {
@@ -228,7 +243,7 @@ async function rpc(fn, args) {
     headers: { apikey: SB_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify(args)
   });
-  if (!r.ok) throw new Error(r.status);
+  if (!r.ok) await fail(r);
   return r.json();
 }
 async function loadGlobal() {
@@ -246,7 +261,7 @@ async function submitScore(name, v) {
     headers: { apikey: SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
     body: JSON.stringify({ name, score: v, device_id: deviceId, mode: gameMode })
   });
-  if (!r.ok) throw new Error(r.status);
+  if (!r.ok) await fail(r);
 }
 function openRank() {
   mode = 'rank';
@@ -300,7 +315,7 @@ entry.addEventListener('submit', async e => {
     if (pos) msg.textContent = (best && better(best, v, m) ? `自己ベスト ${fmtVal(best, m)} のまま ` : '登録しました!')
       + `みんなの中で ${pos}位${dpos ? `・今日 ${dpos}位` : ''}`;
   } catch (err) {
-    sendBtn.disabled = false; msg.textContent = '送信できませんでした';
+    sendBtn.disabled = false; msg.textContent = reasonText(err, '送信できませんでした');
   }
 });
 
@@ -327,7 +342,7 @@ renameForm.addEventListener('submit', async e => {
     if (!n) { rnOk.disabled = false; rnMsg.textContent = 'この端末で登録した記録がまだありません'; return; }
     closeRename(); openRank();
   } catch (err) {
-    rnOk.disabled = false; rnMsg.textContent = '変更できませんでした';
+    rnOk.disabled = false; rnMsg.textContent = reasonText(err, '変更できませんでした');
   }
 });
 
