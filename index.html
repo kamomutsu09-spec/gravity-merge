@@ -95,44 +95,76 @@ const SB_URL = 'https://guvfbgzfbqbpfxhwgnqs.supabase.co';
 const SB_KEY = 'sb_publishable_D0mz1eZY2hRmtdscJ_BJRQ_mZjG91yG';  // 公開用キー(publishable / anon)。書き込みはDB側のルールで制限している
 const online = !!(SB_URL && SB_KEY);
 const G_N = 10;
+// rankTab: 'global'(みんな・全期間) | 'daily'(みんな・今日) | 'local'(この端末)
 let rankTab = online ? 'global' : 'local', gRank = [], gState = 'idle'; // idle | loading | ok | err
+const isOnlineTab = () => rankTab !== 'local';
+// 今日の0時(見ている人の端末の時刻)を、DBで比べられる形式にする
+function todayStart() { const d = new Date(); d.setHours(0, 0, 0, 0); return d.toISOString(); }
+// 端末ID:この端末(ブラウザ)を表すランダムなID。ランキングは端末ごとの最高記録1件で並ぶ
+let deviceId = null;
+try { deviceId = localStorage.getItem('gravDevice'); } catch (e) {}
+if (!deviceId) {
+  deviceId = crypto.randomUUID ? crypto.randomUUID()
+    : 'xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx'.replace(/x/g, () => (Math.random() * 16 | 0).toString(16));
+  try { localStorage.setItem('gravDevice', deviceId); } catch (e) {}
+}
+// DBの関数(RPC)を呼ぶ
+async function rpc(fn, args) {
+  const r = await fetch(`${SB_URL}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: { apikey: SB_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(args)
+  });
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
 async function loadGlobal() {
+  const tab = rankTab;
   gState = 'loading';
   try {
-    const r = await fetch(`${SB_URL}/rest/v1/scores?select=name,score,created_at&order=score.desc&limit=${G_N}`, { headers: { apikey: SB_KEY } });
-    if (!r.ok) throw new Error(r.status);
-    gRank = await r.json(); gState = 'ok';
-  } catch (e) { gState = 'err'; }
+    const data = await rpc('top_scores', { since: tab === 'daily' ? todayStart() : null, n: G_N, me: deviceId });
+    if (rankTab !== tab) return; // 読み込み中にタブが切り替わったら捨てる
+    gRank = data; gState = 'ok';
+  } catch (e) { if (rankTab === tab) gState = 'err'; }
 }
 async function submitScore(name, s) {
   const r = await fetch(`${SB_URL}/rest/v1/scores`, {
     method: 'POST',
     headers: { apikey: SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify({ name, score: s })
+    body: JSON.stringify({ name, score: s, device_id: deviceId })
   });
   if (!r.ok) throw new Error(r.status);
 }
 function openRank() {
   mode = 'rank';
-  if (online && rankTab === 'global') loadGlobal();
+  if (online && isOnlineTab()) loadGlobal();
 }
 
 // ゲームオーバー時の名前入力欄(HTMLのフォーム)
 const entry = document.getElementById('entry'), nm = document.getElementById('nm');
 const sendBtn = document.getElementById('send'), msg = document.getElementById('msg');
 try { nm.value = localStorage.getItem('gravName') || ''; } catch (e) {}
-// 自分が登録した記録 { name, s, pos }(pos = みんなの中での順位、取れなければ 0)
+// 自分が登録した記録 { name, s, pos, dpos, best }
+// pos = みんなの中、dpos = 今日の中での順位(取れなければ 0)、best = 登録前の自己ベスト
 let mine = null;
-async function fetchMyPos(s) {
-  try {
-    const r = await fetch(`${SB_URL}/rest/v1/scores?select=id&score=gt.${s}&limit=1`, { headers: { apikey: SB_KEY, Prefer: 'count=exact' } });
-    const total = +(r.headers.get('content-range') || '').split('/')[1];
-    return Number.isFinite(total) ? total + 1 : 0; // 自分より上の件数 + 1
-  } catch (e) { return 0; }
+// スコア s を登録したら何位か(自己ベストの方が高ければ自己ベストで計算)
+// 返り値 { pos, best, above, below } または null(失敗時)
+async function rankPreview(s, daily) {
+  try { return await rpc('rank_preview', { sc: s, since: daily ? todayStart() : null, me: deviceId }); }
+  catch (e) { return null; }
+}
+// 登録前のプレビュー:{ loading } または { pos, dpos, best, above, below }
+let preview = null;
+async function loadPreview(s) {
+  preview = { loading: true };
+  const [all, day] = await Promise.all([rankPreview(s), rankPreview(s, true)]);
+  if (!over || s !== score) return; // 次のゲームが始まっていたら捨てる
+  preview = all ? { pos: all.pos, dpos: day ? day.pos : 0, best: all.best || 0, above: all.above, below: all.below } : null;
 }
 function showEntry() {
-  mine = null;
+  mine = null; preview = null;
   if (!online || score <= 0) return;
+  loadPreview(score);
   nm.style.display = sendBtn.style.display = ''; sendBtn.disabled = false; msg.textContent = '';
   entry.style.display = 'flex';
 }
@@ -144,12 +176,15 @@ entry.addEventListener('submit', async e => {
   try { localStorage.setItem('gravName', name); } catch (e) {}
   sendBtn.disabled = true; msg.textContent = '送信中…';
   try {
+    const best = preview && !preview.loading ? preview.best : 0; // 登録前の自己ベスト
     await submitScore(name, score);
     nm.style.display = sendBtn.style.display = 'none'; nm.blur();
     msg.textContent = 'みんなのランキングに登録しました!';
-    const pos = await fetchMyPos(score);
-    mine = { name, s: score, pos };
-    if (pos) msg.textContent = `登録しました!みんなの中で ${pos}位`;
+    const [all, day] = await Promise.all([rankPreview(score), rankPreview(score, true)]);
+    const pos = all ? all.pos : 0, dpos = day ? day.pos : 0;
+    mine = { name, s: score, pos, dpos, best };
+    if (pos) msg.textContent = (best > score ? `自己ベスト ${best} のまま ` : '登録しました!')
+      + `みんなの中で ${pos}位${dpos ? `・今日 ${dpos}位` : ''}`;
   } catch (err) {
     sendBtn.disabled = false; msg.textContent = '送信できませんでした';
   }
@@ -167,9 +202,10 @@ function buttons() {
   if (mode === 'rank') {
     const L = rankLayout(), list = [];
     if (online) {
-      const tw = Math.min(120, W * 0.4);
-      list.push({ id: 'tabG', label: 'みんな', x: W / 2 - tw - 4, y: 66, w: tw, h: 36, on: rankTab === 'global' });
-      list.push({ id: 'tabL', label: 'この端末', x: W / 2 + 4, y: 66, w: tw, h: 36, on: rankTab === 'local' });
+      const tw = Math.min(100, (W - 48) / 3);
+      list.push({ id: 'tabG', label: 'みんな', x: W / 2 - tw * 1.5 - 8, y: 66, w: tw, h: 36, on: rankTab === 'global' });
+      list.push({ id: 'tabD', label: '今日', x: W / 2 - tw / 2, y: 66, w: tw, h: 36, on: rankTab === 'daily' });
+      list.push({ id: 'tabL', label: 'この端末', x: W / 2 + tw / 2 + 8, y: 66, w: tw, h: 36, on: rankTab === 'local' });
     }
     list.push({ id: 'title', label: 'もどる', x, y: L.backY, w, h });
     return list;
@@ -189,7 +225,7 @@ function buttons() {
 const setHint = v => { document.getElementById('hint').style.opacity = v; };
 // ランキング画面の行の位置(横画面でも収まるように行間を縮める)
 function rankLayout() {
-  const top = online ? 120 : 76, n = rankTab === 'global' ? G_N : RANK_N;
+  const top = online ? 120 : 76, n = isOnlineTab() ? G_N : RANK_N;
   const sp = Math.max(18, Math.min(30, (H - top - 96) / n));
   // リストの下に「あなた: ○位」の1行ぶん空けて、もどるボタンを置く
   return { top, n, sp, noteY: top + n * sp + 16, backY: Math.min(top + n * sp + 36, H - 56) };
@@ -220,6 +256,7 @@ function press(id) {
   else if (id === 'help') mode = 'help';
   else if (id === 'seeRank') { hideEntry(); rankTab = 'global'; openRank(); }
   else if (id === 'tabG') { rankTab = 'global'; loadGlobal(); }
+  else if (id === 'tabD') { rankTab = 'daily'; loadGlobal(); }
   else if (id === 'tabL') rankTab = 'local';
   else if (id === 'title') { hideEntry(); mode = 'title'; over = false; }
 }
@@ -381,6 +418,32 @@ function drawButtons() {
   }
 }
 
+// ゲームオーバー画面の下に、登録した場合の順位と前後の記録を出す
+function drawPreview() {
+  const y0 = H / 2 + 122;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold 16px sans-serif';
+  if (preview.loading) { ctx.fillStyle = '#fff8'; ctx.fillText('みんなの中での順位を確認中…', W / 2, y0); return; }
+  const p = preview.pos, keep = preview.best > score; // keep = 自己ベストに届かず、順位は自己ベストのまま
+  const day = preview.dpos ? `・今日 ${preview.dpos}位` : '';
+  ctx.fillStyle = '#ffd76a';
+  ctx.fillText(keep ? `自己ベスト ${preview.best} で みんなの中で ${p}位のまま${day}`
+                    : `登録すると みんなの中で ${p}位${day}`, W / 2, y0, W - 32);
+  if (H < 600) return; // 横画面など高さが足りないときは1行だけ
+  const rows = [];
+  if (preview.above) rows.push({ rank: p - 1, name: preview.above.name, s: preview.above.score });
+  rows.push({ rank: p, name: nm.value.trim() || 'あなた', s: Math.max(score, preview.best), me: true });
+  if (preview.below) rows.push({ rank: p + 1, name: preview.below.name, s: preview.below.score });
+  ctx.font = '15px sans-serif';
+  rows.forEach((r, i) => {
+    const y = y0 + 30 + i * 24;
+    if (r.me) { ctx.fillStyle = '#ffd76a30'; ctx.fillRect(W / 2 - 158, y - 11, 316, 22); }
+    ctx.fillStyle = r.me ? '#ffd76a' : '#fffa';
+    ctx.textAlign = 'left'; ctx.fillText(`${r.rank}位`, W / 2 - 150, y);
+    ctx.fillText(r.name, W / 2 - 100, y, 110);
+    ctx.textAlign = 'right'; ctx.fillText(`${r.s}`, W / 2 + 105, y);
+  });
+}
+
 function drawMenu() {
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
   if (mode === 'title') {
@@ -399,19 +462,22 @@ function drawMenu() {
     ctx.font = 'bold 28px sans-serif';
     ctx.fillText('ランキング', W / 2, 40);
     const L = rankLayout(), fs = Math.min(18, L.sp * 0.65);
-    const rows = rankTab === 'global'
-      ? gRank.map(r => ({ name: r.name, s: r.score, d: Date.parse(r.created_at) }))
+    const net = isOnlineTab();
+    const rows = net
+      ? gRank.map(r => ({ name: r.name, s: r.score, d: Date.parse(r.created_at), me: r.mine }))
       : rank.map(r => ({ name: '', s: r.s, d: r.d }));
     let note = '';
-    if (rankTab === 'global' && gState === 'loading') note = '読み込み中…';
-    else if (rankTab === 'global' && gState === 'err') note = '読み込めませんでした';
-    else if (!rows.length) note = 'まだ記録がありません';
+    if (net && gState === 'loading') note = '読み込み中…';
+    else if (net && gState === 'err') note = '読み込めませんでした';
+    else if (!rows.length) note = rankTab === 'daily' ? '今日の記録はまだありません' : 'まだ記録がありません';
     if (note) { ctx.font = '18px sans-serif'; ctx.fillStyle = '#fff8'; ctx.fillText(note, W / 2, L.top + 30); }
-    // 自分が今回登録した記録(みんなタブのみ)
-    const myIdx = rankTab === 'global' && mine ? rows.findIndex(r => r.name === mine.name && r.s === mine.s) : -1;
-    if (!note && rankTab === 'global' && mine && myIdx < 0) {
+    // 自分が今回登録した記録(みんな・今日タブ)
+    // この端末の記録は、DBが返す mine フラグで強調する
+    const myIdx = net ? rows.findIndex(r => r.me) : -1;
+    const myPos = mine ? (rankTab === 'daily' ? mine.dpos : mine.pos) : 0;
+    if (!note && net && myPos && myIdx < 0) {
       ctx.textAlign = 'center'; ctx.font = `${fs}px sans-serif`; ctx.fillStyle = '#ffd76a';
-      ctx.fillText(`あなた: ${mine.pos ? mine.pos + '位 ' : ''}${mine.s}`, W / 2, L.noteY);
+      ctx.fillText(`あなた: ${myPos}位`, W / 2, L.noteY);
     }
     if (!note) rows.forEach((r, i) => {
       const y = L.top + i * L.sp + L.sp / 2;
@@ -477,6 +543,7 @@ function draw() {
     ctx.fillText(`スコア ${score}${lastRank === 0 ? '(ハイスコア!)' : ''}`, W / 2, H / 2 - 70);
     if (lastRank >= 0) ctx.fillText(`この端末で ${lastRank + 1}位`, W / 2, H / 2 - 44);
     drawButtons();
+    if (!mine && preview) drawPreview();
   }
 }
 
