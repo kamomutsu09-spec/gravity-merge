@@ -51,8 +51,8 @@ const MODES = {
     hint: 'スワイプした方向が「下」になる / 同じ数字がぶつかると合体 / 増えすぎたら負け' },
   c15: { label: '15チャレンジ', short: '15チャレ', desc: '15を作るまでのタイムを競う', time: true,
     hint: 'できるだけ早く15を作ろう / 増えすぎたら失敗' },
-  zero: { label: 'ゼロ重力', short: 'ゼロ重力', desc: '重力なし。触れた場所のボールで押す',
-    hint: '重力なし / 画面に触れると指の場所にボールが出る。それで押して合体させよう' },
+  zero: { label: 'ゼロ重力', short: 'ゼロ重力', desc: '重力なし。ボールで押す。降る間隔が短い',
+    hint: '重力なし・ボールが降る間隔が短い / 触れた場所に出るボールで押して合体させよう' },
   gyro: { label: 'ジャイロ', short: 'ジャイロ', desc: '端末を傾けて重力を操作する',
     hint: '端末を傾けた方向に重力がかかる / 大きく傾けるほど強い' }
 };
@@ -174,21 +174,29 @@ let mode = 'title'; // 'notice' | 'title' | 'rank' | 'help' | 'play'
 let peek = false;   // ゲームオーバー後に「画面を見る」で盤面だけを表示中か
 let entryWas = 'none'; // 画面を見る前の名前入力欄の表示状態
 
-// ランキング仕様変更のお知らせ(以前から遊んでいる端末に1回だけ表示)
-const NOTICE_KEY = 'gravNotice1';
+// 更新のお知らせ:この版を初めて開いた端末に1回だけ表示する
+// (2026-11-14 スライドパッド・ジャイロ・ゼロ重力の変更。前の「ランキングが新しくなりました」(gravNotice1)は古いので出さない)
+const NOTICE_KEY = 'gravNotice2';
+const NOTICE_OLD_KEYS = ['gravNotice1'];
+const NOTICE_HEAD = '新しい遊び方を追加・変更しました';
+// [文, 見出しか]
 const NOTICE = [
-  '1つの端末につき、最高記録1件だけが並ぶようになりました',
-  '「今日」のランキングを追加しました',
-  '登録する前に、何位になるか確認できます',
-  'これまでの記録は、同じ名前ごとにまとめました'
+  ['スライドパッド操作', true],
+  ['タイトル右上の「操作」で切り替え', false],
+  ['画面中央のパッドで、重力の向きと強さを決める', false],
+  ['ジャイロモード', true],
+  ['モード選択に追加。端末を傾けて重力を操作する', false],
+  ['ゼロ重力の遊び方を変更', true],
+  ['触れた場所に出るボールで、ほかのボールを押す', false],
+  ['ランキングはリセットしました', false]
 ];
-try {
-  if (!localStorage.getItem(NOTICE_KEY)) {
-    const returning = localStorage.getItem('gravHi') || localStorage.getItem('gravRank') || localStorage.getItem('gravName');
-    if (returning) mode = 'notice';
-    else localStorage.setItem(NOTICE_KEY, '1'); // 初めての人には出さない
-  }
-} catch (e) {}
+try { if (!localStorage.getItem(NOTICE_KEY)) mode = 'notice'; } catch (e) {}
+// お知らせの配置(高さが足りないときは上に詰め、行間を縮める)
+function noticeLayout() {
+  const top = Math.max(50, Math.min(H * 0.25, H - (66 + NOTICE.length * 32 + 76)));
+  const sp = Math.max(22, Math.min(32, (H - top - 66 - 76) / NOTICE.length));
+  return { top, sp, okY: Math.min(top + 70 + NOTICE.length * sp, H - 56) };
+}
 
 // --- この端末のランキング(モードごとに上位5件) ---
 const RANK_N = 5;
@@ -402,7 +410,7 @@ function buttons() {
     return list;
   }
   if (mode === 'help') return [{ id: 'title', label: 'もどる', x, y: helpLayout().backY, w, h }];
-  if (mode === 'notice') return [{ id: 'noticeOk', label: 'OK', x, y: Math.min(H * 0.25 + 70 + NOTICE.length * 32, H - 60), w, h, on: true }];
+  if (mode === 'notice') return [{ id: 'noticeOk', label: 'OK', x, y: noticeLayout().okY, w, h, on: true }];
   if (mode === 'rank') {
     const L = rankLayout(), list = [];
     const k = MODE_IDS.length, mw = Math.min(96, (W - 24 - 6 * (k - 1)) / k), mx = W / 2 - (mw * k + 6 * (k - 1)) / 2;
@@ -455,7 +463,7 @@ const HELP = [
   'ボールが80個以上の状態が2秒続くとゲームオーバー',
   '【通常モード】スコアを稼ぐ。15が3つくっつくと +1,000,000',
   '【15チャレンジ】15を作るまでのタイムを競う',
-  '【ゼロ重力】重力なし。触れた場所に出るボールで押して合体させる',
+  '【ゼロ重力】重力なし。触れた場所のボールで押す。降る間隔が短い',
   '【ジャイロ】端末を傾けた方向に重力。大きく傾けるほど強い',
   'プレイ中は画面上の「II」で一時停止。音のオン/オフも切り替えられる'
 ];
@@ -506,13 +514,16 @@ function press(id) {
   else if (id === 'tabD') { rankTab = 'daily'; loadGlobal(); }
   else if (id === 'tabL') rankTab = 'local';
   else if (id === 'title') { hideEntry(); mode = 'title'; over = false; peek = false; paused = false; setHint(0); }
-  else if (id === 'noticeOk') { try { localStorage.setItem(NOTICE_KEY, '1'); } catch (e) {} mode = 'title'; }
+  else if (id === 'noticeOk') {
+    try { [NOTICE_KEY, ...NOTICE_OLD_KEYS].forEach(k => localStorage.setItem(k, '1')); } catch (e) {}
+    mode = 'title';
+  }
   else if (id === 'peek') { peek = true; entryWas = entry.style.display; entry.style.display = 'none'; nm.blur(); }
   else if (id === 'share') shareOnUp = true; // 新しいタブは指を離したとき(pointerup)にしか開けないので、そこで開く
 }
 
 function resetState() {
-  over = false; ticks = 0; nextSpawn = 30; full = 0; merges = 0; best = 0; score = 0; bonusT = 0; result = 0;
+  over = false; ticks = 0; nextSpawn = gameMode === 'zero' ? 12 : 30; full = 0; merges = 0; best = 0; score = 0; bonusT = 0; result = 0;
 }
 
 // ゲーム終了。ok = 15チャレンジで15を作れたか
@@ -616,7 +627,19 @@ function init() {
   Matter.Events.on(engine, 'collisionStart', onCollide);
   pusher = null; // 新しい物理世界なので、押すボールも作り直し
   resetState();
-  addBalls(W / 2, H / 3, 15);
+  if (gameMode === 'zero') {
+    // ゼロ重力:最初から30個。数字は1〜8から均等にランダムで、画面全体にばらまく。
+    // 重なると開始直後に勝手に合体してしまうので、重ならない位置を探して置く(最大60回試す)
+    for (let i = 0; i < 30; i++) {
+      const lv = Math.floor(Math.random() * 8), r = radiusOf(lv);
+      let x, y, tries = 0;
+      do {
+        x = r + Math.random() * (W - 2 * r); y = 50 + r + Math.random() * (H - 50 - 2 * r);
+      } while (++tries < 60 && balls.some(o => Math.hypot(o.position.x - x, o.position.y - y) < o.circleRadius + r + 2));
+      const b = makeBall(x, y, lv);
+      Body.setVelocity(b, { x: (Math.random() - 0.5) * 2 * S, y: (Math.random() - 0.5) * 2 * S });
+    }
+  } else addBalls(W / 2, H / 3, 15);
 }
 
 // --- ゼロ重力:触れている場所に「押すボール」を出し、指を追いかけさせてほかのボールを押す ---
@@ -773,8 +796,8 @@ function loop(now) {
       addBalls(W * (0.15 + Math.random() * 0.7), H * (0.15 + Math.random() * 0.7), 1);
       const sec = ticks / 60;
       let iv = Math.max(10, 24 - sec); // 降る間隔(ステップ数)。約14秒で10まで縮む
-      // ゼロ重力は14秒を過ぎても縮み続ける(44秒で5、74秒で約3.3、下限3)
-      if (gameMode === 'zero' && sec > 14) iv = Math.max(3, 10 / (1 + (sec - 14) / 30));
+      // ゼロ重力は最初から短く(12)、縮み続ける(30秒で6、60秒で4、約90秒で下限3)
+      if (gameMode === 'zero') iv = Math.max(3, 12 / (1 + sec / 30));
       nextSpawn = ticks + iv;
     }
     // 満杯の状態が続いたら終了
@@ -904,12 +927,16 @@ function drawPreview() {
 function drawMenu() {
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
   if (mode === 'notice') {
+    const L = noticeLayout();
     ctx.font = 'bold 24px sans-serif'; ctx.fillStyle = '#ffd76a';
-    ctx.fillText('お知らせ', W / 2, H * 0.25 - 10);
+    ctx.fillText('お知らせ', W / 2, L.top - 10);
     ctx.font = 'bold 18px sans-serif'; ctx.fillStyle = '#fff';
-    ctx.fillText('ランキングが新しくなりました', W / 2, H * 0.25 + 26, W - 32);
-    ctx.font = '15px sans-serif'; ctx.fillStyle = '#fffc';
-    NOTICE.forEach((t, i) => ctx.fillText('・' + t, W / 2, H * 0.25 + 66 + i * 32, W - 32));
+    ctx.fillText(NOTICE_HEAD, W / 2, L.top + 26, W - 32);
+    NOTICE.forEach(([t, head], i) => {
+      ctx.font = head ? 'bold 16px sans-serif' : '15px sans-serif';
+      ctx.fillStyle = head ? '#ffd76a' : '#fffc';
+      ctx.fillText(t, W / 2, L.top + 66 + i * L.sp, W - 32);
+    });
   } else if (mode === 'title') {
     ctx.font = `bold ${Math.min(40, W * 0.1)}px sans-serif`;
     ctx.fillText('重力スワイプ', W / 2, H * 0.28);
