@@ -192,7 +192,8 @@ try {
 
 // --- この端末のランキング(モードごとに上位5件) ---
 const RANK_N = 5;
-const rankKey = m => m === 'normal' ? 'gravRank' : 'gravRank_' + m;
+// ゼロ重力は 2026-11-14 に遊び方が変わったので、保存場所を変えて記録を数え直す(古い記録は使わない)
+const rankKey = m => m === 'normal' ? 'gravRank' : m === 'zero' ? 'gravRank_zero2' : 'gravRank_' + m;
 const ranks = {};
 for (const m of MODE_IDS) {
   let r = [];
