@@ -44,16 +44,31 @@ const G_MAX = 1.5;
 let gPow = 1, gPowTarget = 1;
 
 // --- モード ---
-// normal: スコアを稼ぐ / c15: 15を作るまでのタイム(短いほど良い) / zero: 重力なし、スワイプで弾く
+// normal: スコアを稼ぐ / c15: 15を作るまでのタイム(短いほど良い)
+// zero: 重力なし、指の場所に出るボールで押す / gyro: 端末の傾きで重力を操作
 const MODES = {
   normal: { label: '通常モード', short: '通常', desc: 'スコアを稼ぐ。15が3つで +1,000,000',
     hint: 'スワイプした方向が「下」になる / 同じ数字がぶつかると合体 / 増えすぎたら負け' },
-  c15: { label: '15チャレンジ', short: '15チャレンジ', desc: '15を作るまでのタイムを競う', time: true,
+  c15: { label: '15チャレンジ', short: '15チャレ', desc: '15を作るまでのタイムを競う', time: true,
     hint: 'できるだけ早く15を作ろう / 増えすぎたら失敗' },
-  zero: { label: 'ゼロ重力', short: 'ゼロ重力', desc: '重力なし。スワイプして離すとボールを弾く',
-    hint: '重力なし / スワイプして離すと、その方向にボールを弾く' }
+  zero: { label: 'ゼロ重力', short: 'ゼロ重力', desc: '重力なし。触れた場所のボールで押す',
+    hint: '重力なし / 画面に触れると指の場所にボールが出る。それで押して合体させよう' },
+  gyro: { label: 'ジャイロ', short: 'ジャイロ', desc: '端末を傾けて重力を操作する',
+    hint: '端末を傾けた方向に重力がかかる / 大きく傾けるほど強い' }
 };
-const MODE_IDS = ['normal', 'c15', 'zero'];
+const MODE_IDS = ['normal', 'c15', 'zero', 'gyro'];
+
+// --- 操作方法(通常モードと15チャレンジで使う)。タイトル右上で切り替える ---
+// swipe: スワイプの始点→指の位置 / pad: 画面中央のスライドパッドの中心→指の位置
+let ctrl = 'swipe';
+try { if (localStorage.getItem('gravCtrl') === 'pad') ctrl = 'pad'; } catch (e) {}
+const usesCtrl = () => gameMode === 'normal' || gameMode === 'c15';
+const padMode = () => usesCtrl() && ctrl === 'pad';
+const padR = () => Math.min(W, H) * 0.32; // スライドパッドの半径
+function toggleCtrl() {
+  ctrl = ctrl === 'pad' ? 'swipe' : 'pad';
+  try { localStorage.setItem('gravCtrl', ctrl); } catch (e) {}
+}
 let gameMode = 'normal'; // 遊んでいるモード
 let rankMode = 'normal'; // ランキング画面で見ているモード
 const isTime = m => !!MODES[m].time;
@@ -349,8 +364,8 @@ renameForm.addEventListener('submit', async e => {
 // --- 画面上のボタン(キャンバスに描いて、タップ位置で判定する) ---
 // モード選択画面の配置(横画面でも収まるように間隔を調整)
 function selectLayout() {
-  const top = 84, sp = Math.max(70, Math.min(100, (H - top - 76) / MODE_IDS.length));
-  return { top, sp, h: Math.min(60, sp - 26), backY: Math.min(top + MODE_IDS.length * sp + 4, H - 56) };
+  const top = 84, sp = Math.max(58, Math.min(96, (H - top - 76) / MODE_IDS.length));
+  return { top, sp, h: Math.min(58, sp - 24), backY: Math.min(top + MODE_IDS.length * sp + 4, H - 56) };
 }
 function buttons() {
   const w = Math.min(240, W * 0.7), h = 48, x = W / 2 - w / 2;
@@ -359,7 +374,14 @@ function buttons() {
     { id: 'select', label: 'モード選択', x, y: H * 0.5, w, h, on: true },
     { id: 'rank', label: 'ランキング', x, y: H * 0.5 + 64, w, h },
     { id: 'help', label: '遊び方', x, y: H * 0.5 + 128, w, h },
-    { ...sndBtn, x: W - 92, y: 12, w: 80, h: 34 }
+    { ...sndBtn, x: 12, y: 12, w: 80, h: 34 },
+    // 右上:操作方法の切り替え(通常モードと15チャレンジで使う)
+    { id: 'ctrl', label: ctrl === 'pad' ? '操作:パッド' : '操作:スワイプ', x: W - 136, y: 12, w: 124, h: 34, fs: 14, on: ctrl === 'pad' }
+  ];
+  // ジャイロの角度合わせ画面
+  if (mode === 'gyroCal') return [
+    { id: 'gyroStart', label: 'スタート', x, y: H - 140, w, h, on: gyroInRange() },
+    { id: 'select', label: 'もどる', x, y: H - 80, w, h }
   ];
   // プレイ中:上の中央に一時停止ボタン。一時停止中はメニュー
   if (mode === 'play' && !over) {
@@ -382,8 +404,8 @@ function buttons() {
   if (mode === 'notice') return [{ id: 'noticeOk', label: 'OK', x, y: Math.min(H * 0.25 + 70 + NOTICE.length * 32, H - 60), w, h, on: true }];
   if (mode === 'rank') {
     const L = rankLayout(), list = [];
-    const mw = Math.min(110, (W - 48) / 3), mx = W / 2 - mw * 1.5 - 8;
-    MODE_IDS.forEach((m, i) => list.push({ id: 'rm_' + m, label: MODES[m].short, x: mx + i * (mw + 8), y: 60, w: mw, h: 34, fs: 14, on: rankMode === m }));
+    const k = MODE_IDS.length, mw = Math.min(96, (W - 24 - 6 * (k - 1)) / k), mx = W / 2 - (mw * k + 6 * (k - 1)) / 2;
+    MODE_IDS.forEach((m, i) => list.push({ id: 'rm_' + m, label: MODES[m].short, x: mx + i * (mw + 6), y: 60, w: mw, h: 34, fs: 14, on: rankMode === m }));
     if (online) {
       const tw = Math.min(100, (W - 48) / 3), tx = W / 2 - tw * 1.5 - 8;
       [['tabG', 'みんな', 'global'], ['tabD', '今日', 'daily'], ['tabL', 'この端末', 'local']].forEach(([id, label, t], i) =>
@@ -427,11 +449,13 @@ function rankLayout() {
 const HELP = [
   'スワイプした方向が「下」になり、ボールが流れる',
   '指を始点から遠くへ動かすほど、重力が強くなる',
+  'タイトル右上で操作を「パッド」に変えられる(中心から指の方向に重力)',
   '同じ数字がぶつかると、次の数字に合体(最大15)',
   'ボールが80個以上の状態が2秒続くとゲームオーバー',
   '【通常モード】スコアを稼ぐ。15が3つくっつくと +1,000,000',
   '【15チャレンジ】15を作るまでのタイムを競う',
-  '【ゼロ重力】重力なし。スワイプして離すと、その方向にボールを弾く',
+  '【ゼロ重力】重力なし。触れた場所に出るボールで押して合体させる',
+  '【ジャイロ】端末を傾けた方向に重力。大きく傾けるほど強い',
   'プレイ中は画面上の「II」で一時停止。音のオン/オフも切り替えられる'
 ];
 function helpLayout() {
@@ -439,8 +463,9 @@ function helpLayout() {
   return { top, sp, backY: Math.min(top + HELP.length * sp + 10, H - 56) };
 }
 // 初めての人向けの案内(モードごとに初回だけ。1回スワイプすると消える)
-let tutorial = false;
-const tutKey = m => 'gravTut_' + m;
+let tutorial = false, tutStart = 0;
+// 案内はモードごと(通常・15チャレンジは操作方法ごと)に初回だけ
+const tutKey = m => 'gravTut_' + m + ((m === 'normal' || m === 'c15') && ctrl === 'pad' ? '_pad' : '');
 function endTutorial() {
   if (!tutorial) return;
   tutorial = false;
@@ -450,22 +475,30 @@ function startGame() {
   hideEntry(); peek = false; paused = false; down = null;
   init();
   gTarget = { x: 0, y: 1 }; gNow = { x: 0, y: 1 }; gPow = gPowTarget = 1;
+  if (gameMode === 'gyro') gPow = gPowTarget = 0; // 基準の角度のままなら重力なし
   mode = 'play';
   try { tutorial = !localStorage.getItem(tutKey(gameMode)); } catch (e) { tutorial = false; }
-  hintEl.textContent = MODES[gameMode].hint;
+  tutStart = performance.now();
+  hintEl.textContent = gameMode === 'normal' && padMode()
+    ? 'パッドの中心から指の方向に重力 / 中心から離すほど強い / 増えすぎたら負け' : MODES[gameMode].hint;
   setHint(tutorial ? 0 : 1); // 案内を出すときは下の説明文は隠す
 }
+// もう一度・やり直す:ジャイロは角度合わせからやり直す
+function restart() { if (gameMode === 'gyro') openGyroCal(); else startGame(); }
 function press(id) {
   sfx.click();
-  if (id.startsWith('m_')) { gameMode = id.slice(2); startGame(); }
-  else if (id === 'pause') { paused = true; down = null; setHint(0); }
+  if (id === 'm_gyro') { gameMode = 'gyro'; gyroOnUp = true; } // 傾きセンサーの許可は指を離したときに求める(iPhone)
+  else if (id.startsWith('m_')) { gameMode = id.slice(2); startGame(); }
+  else if (id === 'gyroStart') startGyro();
+  else if (id === 'ctrl') toggleCtrl();
+  else if (id === 'pause') { paused = true; down = null; removePusher(); setHint(0); }
   else if (id === 'resume') paused = false;
   else if (id === 'snd') toggleSound();
   else if (id.startsWith('rm_')) { rankMode = id.slice(3); if (online && isOnlineTab()) loadGlobal(); }
-  else if (id === 'retry') startGame();
+  else if (id === 'retry') restart();
   else if (id === 'rank') { rankMode = gameMode; openRank(); }
   else if (id === 'help') mode = 'help';
-  else if (id === 'select') mode = 'select';
+  else if (id === 'select') { mode = 'select'; gyroMsg = ''; }
   else if (id === 'renameBtn') openRename();
   else if (id === 'seeRank') { hideEntry(); rankMode = gameMode; rankTab = 'global'; openRank(); }
   else if (id === 'tabG') { rankTab = 'global'; loadGlobal(); }
@@ -485,6 +518,7 @@ function resetState() {
 function finish(ok) {
   if (over) return;
   over = true;
+  removePusher(); down = null;
   if (gameMode === 'c15') result = ok ? Math.round(ticks * 1000 / 60) : 0; // 時間はステップ数から計算(処理落ちの影響を受けない)
   else result = score;
   if (!(gameMode === 'c15' && ok)) sfx.over(); // 15チャレンジのクリアは15ができた音だけ
@@ -579,12 +613,85 @@ function init() {
   walls = makeWalls();
   Composite.add(engine.world, walls);
   Matter.Events.on(engine, 'collisionStart', onCollide);
+  pusher = null; // 新しい物理世界なので、押すボールも作り直し
   resetState();
   addBalls(W / 2, H / 3, 15);
 }
 
+// --- ゼロ重力:触れている場所に「押すボール」を出し、指を追いかけさせてほかのボールを押す ---
+// ほかのボールより重く、合体せず、ボールの数にも数えない(balls に入れない)
+let pusher = null, pushTarget = null;
+function addPusher(x, y) {
+  removePusher();
+  pusher = Bodies.circle(x, y, 30 * S, { density: 0.02, frictionAir: 0.2, restitution: 0.1, friction: 0.05 }, 16);
+  Composite.add(engine.world, pusher);
+  pushTarget = { x, y };
+}
+function removePusher() {
+  if (pusher && engine) Composite.remove(engine.world, pusher);
+  pusher = null; pushTarget = null;
+}
+// 物理1ステップごとに、押すボールを指の位置へ向かわせる(速度で動かすので、ぶつかったボールを押せる)
+function stepPusher() {
+  if (!pusher || !pushTarget) return;
+  let vx = (pushTarget.x - pusher.position.x) * 0.35, vy = (pushTarget.y - pusher.position.y) * 0.35;
+  const v = Math.hypot(vx, vy), vmax = 25 * S;
+  if (v > vmax) { vx *= vmax / v; vy *= vmax / v; }
+  Body.setVelocity(pusher, { x: vx, y: vy });
+}
+
+// --- ジャイロ:端末の傾き(DeviceOrientation)で重力を操作 ---
+// beta = 前後の傾き(縦持ちで手前に起こすほど大きい)、gamma = 左右の傾き(右を下げると正)
+const GYRO_MAX = 25; // 基準から25°傾けると最大の強さ
+const GYRO_RANGE = { bMin: 15, bMax: 75, gMax: 20 }; // スタートしてよい角度の範囲(縦持ちで少し手前に傾けた状態)
+let tilt = { b: 0, g: 0, has: false }, gyroBase = null, gyroListening = false, gyroOnUp = false, gyroMsg = '', gyroCalAt = 0;
+function onTilt(e) {
+  if (e.beta == null || e.gamma == null) return;
+  tilt.b = e.beta; tilt.g = e.gamma; tilt.has = true;
+}
+const gyroInRange = () => tilt.has && tilt.b >= GYRO_RANGE.bMin && tilt.b <= GYRO_RANGE.bMax && Math.abs(tilt.g) <= GYRO_RANGE.gMax;
+// iPhone は「指を離したとき」に許可を求める必要がある。Android やパソコンは許可不要
+function requestGyro() {
+  const D = window.DeviceOrientationEvent;
+  if (D && typeof D.requestPermission === 'function') {
+    D.requestPermission()
+      .then(r => { if (r === 'granted') openGyroCal(); else { gyroMsg = '傾きセンサーの使用が許可されませんでした'; mode = 'select'; } })
+      .catch(() => { gyroMsg = '傾きセンサーを使えませんでした'; mode = 'select'; });
+  } else openGyroCal();
+}
+function openGyroCal() {
+  if (!gyroListening) { addEventListener('deviceorientation', onTilt); gyroListening = true; }
+  hideEntry(); over = false; peek = false; paused = false; removePusher();
+  gameMode = 'gyro'; mode = 'gyroCal'; gyroMsg = ''; gyroCalAt = performance.now(); setHint(0);
+}
+function startGyro() {
+  if (!gyroInRange()) { gyroMsg = tilt.has ? '角度を範囲の中に入れてからスタートしてね' : 'この端末では傾きセンサーが使えないようです'; return; }
+  gyroBase = { b: tilt.b, g: tilt.g }; // スタートした瞬間の角度を基準にする
+  startGame();
+}
+// 基準からの傾きを、画面の向き(縦・横)に合わせて「画面上の x, y」に直す
+function gyroVector() {
+  if (!gyroBase || !tilt.has) return { x: 0, y: 0 };
+  const dx = tilt.g - gyroBase.g, dy = tilt.b - gyroBase.b;
+  const a = ((screen.orientation && screen.orientation.angle) || window.orientation || 0) * Math.PI / 180;
+  return { x: dx * Math.cos(a) + dy * Math.sin(a), y: -dx * Math.sin(a) + dy * Math.cos(a) };
+}
+function stepGyro() {
+  const v = gyroVector(), d = Math.hypot(v.x, v.y);
+  if (d > 1) gTarget = { x: v.x / d, y: v.y / d };
+  gPowTarget = G_MAX * Math.min(1, d / GYRO_MAX);
+  if (tutorial && (d > 8 || performance.now() - tutStart > 5000)) endTutorial();
+}
+
 // --- 入力 ---
 let down = null;
+// スライドパッド:パッドの中心から指の方向に重力。中心から離すほど強く、縁で最大
+function padFrom(x, y) {
+  const dx = x - W / 2, dy = y - H / 2, d = Math.hypot(dx, dy);
+  if (d > 2) gTarget = { x: dx / d, y: dy / d };
+  gPowTarget = G_MAX * Math.min(1, d / padR());
+  if (d > 40) endTutorial();
+}
 cv.addEventListener('pointerdown', e => {
   audio(); // 音はユーザーの操作の中でしか鳴らし始められないので、最初のタップで準備する
   // 盤面を見ている間は、どこをタップしても結果画面に戻る
@@ -594,28 +701,30 @@ cv.addEventListener('pointerdown', e => {
   if (b) { press(b.id); return; }
   if (mode !== 'play' || over || paused) return;
   down = { x: e.clientX, y: e.clientY }; // スワイプの開始点
+  if (gameMode === 'zero') addPusher(e.clientX, e.clientY);
+  else if (padMode()) padFrom(e.clientX, e.clientY);
+  setHint(0);
 });
 cv.addEventListener('pointermove', e => {
   if (!down) return;
-  // 開始点から今の指の位置まで:向き = 重力(ゼロ重力では弾く)の向き、距離 = 強さ(戻せば弱まる)
   const dx = e.clientX - down.x, dy = e.clientY - down.y, d = Math.hypot(dx, dy);
+  if (gameMode === 'zero') { // 押すボールを指へ向かわせる
+    if (pusher) pushTarget = { x: e.clientX, y: e.clientY };
+    if (d > 40) endTutorial();
+    return;
+  }
+  if (gameMode === 'gyro') return; // ジャイロは傾きだけで操作
+  if (padMode()) { padFrom(e.clientX, e.clientY); return; }
+  // スワイプ:開始点から今の指の位置まで。向き = 重力の向き、距離 = 強さ(戻せば弱まる)
   if (d > 8) gTarget = { x: dx / d, y: dy / d }; // 開始点のすぐ近くでは向きを変えない
   // 画面の短辺の6割ほど離れると最大の強さ
   gPowTarget = 1 + (G_MAX - 1) * Math.min(1, d / (Math.min(W, H) * 0.6));
   if (d > 40) endTutorial(); // しっかりスワイプできたら案内を消す
-  setHint(0);
 });
 // 別のアプリに切り替えたら自動で一時停止
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && mode === 'play' && !over) { paused = true; down = null; }
+  if (document.hidden && mode === 'play' && !over) { paused = true; down = null; removePusher(); }
 });
-// ゼロ重力:指を離した瞬間に、すべてのボールをスワイプの方向へ弾く
-function flick(e) {
-  const dx = e.clientX - down.x, dy = e.clientY - down.y, d = Math.hypot(dx, dy);
-  if (d <= 8) return;
-  const t = Math.min(1, d / (Math.min(W, H) * 0.6)), sp = (3 + 9 * t) * S, ux = dx / d, uy = dy / d;
-  for (const b of balls) Body.setVelocity(b, { x: b.velocity.x + ux * sp, y: b.velocity.y + uy * sp });
-}
 // --- 結果のシェア(X の投稿画面を開く) ---
 const SITE_URL = 'https://kamomutsu09-spec.github.io/gravity-merge/';
 let shareOnUp = false;
@@ -636,10 +745,12 @@ cv.addEventListener('pointerup', e => {
   // 音の準備と、新しいタブを開く処理はここで行う
   audio();
   if (shareOnUp) { shareOnUp = false; openShare(); }
-  if (down && gameMode === 'zero' && mode === 'play' && !over) { flick(e); gPowTarget = 1; }
+  if (gyroOnUp) { gyroOnUp = false; requestGyro(); } // 傾きセンサーの許可(iPhone)
+  // スライドパッドは指を離しても最後の重力のまま。ゼロ重力は押すボールを消す
+  removePusher();
   down = null;
 });
-cv.addEventListener('pointercancel', () => { down = null; });
+cv.addEventListener('pointercancel', () => { down = null; removePusher(); });
 addEventListener('resize', onResize);
 
 // --- ループ ---
@@ -668,14 +779,16 @@ function loop(now) {
     // 満杯の状態が続いたら終了
     full = balls.length >= LIMIT ? full + 1 : 0;
     if (full >= GRACE) finish(false);
-    // 重力の向きをなめらかに切り替える(ゼロ重力では矢印の表示にだけ使う)
+    if (gameMode === 'gyro') stepGyro();
+    if (gameMode === 'zero') stepPusher();
+    // 重力の向きをなめらかに切り替える
     gNow.x += (gTarget.x - gNow.x) * 0.15;
     gNow.y += (gTarget.y - gNow.y) * 0.15;
     gPow += (gPowTarget - gPow) * 0.15;
     if (gameMode === 'zero') { engine.gravity.x = 0; engine.gravity.y = 0; }
     else { engine.gravity.x = gNow.x * gPow; engine.gravity.y = gNow.y * gPow; }
     Engine.update(engine, STEP);
-    if (gameMode === 'normal' || gameMode === 'zero') checkTriple();
+    if (gameMode !== 'c15') checkTriple();
     if (bonusT > 0) bonusT--;
     acc -= STEP;
   }
@@ -711,26 +824,56 @@ function ballSprite(lv) {
   return (sprites[lv] = c);
 }
 
-// 初回の案内:指(白い丸)が左から右へスワイプする動きを繰り返し見せる
+// 初回の案内:操作の動き(指の白い丸)を繰り返し見せる
+const TUT_TEXT = {
+  swipe: ['画面をスワイプしてみよう', 'スワイプした方向が「下」になる'],
+  pad: ['パッドに触れて重力を操作しよう', '中心から指の方向に重力。離すほど強い'],
+  zero: ['画面に触れると指の場所にボールが出る', 'そのボールで押して、同じ数字をくっつけよう'],
+  gyro: ['端末を傾けてみよう', '傾けた方向に重力。大きく傾けるほど強い']
+};
 function drawTutorial() {
   const p = (performance.now() % 1600) / 1600, e = Math.min(1, p / 0.7), ease = e * (2 - e);
-  const y = H * 0.36, x0 = W / 2 - 80, x = x0 + 160 * ease;
+  const kind = gameMode === 'zero' ? 'zero' : gameMode === 'gyro' ? 'gyro' : padMode() ? 'pad' : 'swipe';
+  const [t1, t2] = TUT_TEXT[kind];
+  // パッドは中心から右下へ、それ以外は左から右へ指が動く
+  let y = H * 0.36, x0 = W / 2 - 80, y0 = y, x1 = W / 2 + 80, y1 = y;
+  if (kind === 'pad') { x0 = W / 2; y0 = H / 2; x1 = W / 2 + padR() * 0.7; y1 = H / 2 + padR() * 0.5; }
+  const x = x0 + (x1 - x0) * ease, yy = y0 + (y1 - y0) * ease;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   // 説明文(読みやすいよう背景付き)
-  const t1 = gameMode === 'zero' ? 'スワイプして指を離すと' : '画面をスワイプしてみよう';
-  const t2 = gameMode === 'zero' ? 'その方向にボールが弾ける' : 'スワイプした方向が「下」になる';
   ctx.font = 'bold 17px sans-serif';
-  const tw = Math.max(ctx.measureText(t1).width, ctx.measureText(t2).width) + 32;
+  const tw = Math.min(W - 16, Math.max(ctx.measureText(t1).width, ctx.measureText(t2).width) + 32);
   ctx.fillStyle = '#000a'; ctx.beginPath(); ctx.roundRect(W / 2 - tw / 2, y - 92, tw, 60, 14); ctx.fill();
-  ctx.fillStyle = '#fff'; ctx.fillText(t1, W / 2, y - 73);
-  ctx.font = '14px sans-serif'; ctx.fillStyle = '#fffc'; ctx.fillText(t2, W / 2, y - 50);
+  ctx.fillStyle = '#fff'; ctx.fillText(t1, W / 2, y - 73, tw - 16);
+  ctx.font = '14px sans-serif'; ctx.fillStyle = '#fffc'; ctx.fillText(t2, W / 2, y - 50, tw - 16);
+  if (kind === 'gyro') { // スマホが左右に傾く絵
+    const a = Math.sin(performance.now() / 500) * 0.35;
+    ctx.save(); ctx.translate(W / 2, y + 10); ctx.rotate(a);
+    ctx.strokeStyle = '#ffd76a'; ctx.lineWidth = 4; ctx.beginPath(); ctx.roundRect(-22, -38, 44, 76, 8); ctx.stroke();
+    ctx.restore();
+    return;
+  }
   // 指の軌跡と指
   ctx.globalAlpha = p < 0.85 ? 1 : (1 - p) / 0.15;
   ctx.strokeStyle = '#ffd76a99'; ctx.lineWidth = 6; ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x, y); ctx.stroke();
-  ctx.fillStyle = '#fffe'; ctx.beginPath(); ctx.arc(x, y, 16, 0, 7); ctx.fill();
-  ctx.strokeStyle = '#ffd76a'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, 22, 0, 7); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x, yy); ctx.stroke();
+  ctx.fillStyle = '#fffe'; ctx.beginPath(); ctx.arc(x, yy, 16, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#ffd76a'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, yy, 22, 0, 7); ctx.stroke();
   ctx.globalAlpha = 1;
+}
+
+// スライドパッド:画面中央の薄い円。つまみの位置 = 重力の向きと強さ(縁で最大)
+function drawPad() {
+  const cx = W / 2, cy = H / 2, R = padR();
+  ctx.fillStyle = '#ffffff0a'; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#ffffff30'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.stroke();
+  ctx.strokeStyle = '#ffffff18'; ctx.beginPath();
+  ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
+  const m = Math.hypot(gNow.x, gNow.y) || 1, k = Math.min(1, gPow / G_MAX) * R;
+  const kx = cx + gNow.x / m * k, ky = cy + gNow.y / m * k;
+  ctx.strokeStyle = '#ffffff55'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(kx, ky); ctx.stroke();
+  ctx.fillStyle = down ? '#ffffff90' : '#ffffff55'; ctx.beginPath(); ctx.arc(kx, ky, 18 * S, 0, 7); ctx.fill();
 }
 
 // 結果画面の下に、登録した場合の順位と前後の記録を出す
@@ -784,6 +927,34 @@ function drawMenu() {
       const rec = v ? `${isTime(m) ? 'ベスト' : '最高'} ${fmtVal(v, m)}` : '記録なし';
       ctx.fillText(`${MODES[m].desc} ・ ${rec}`, W / 2, b.y + b.h + 13, W - 32);
     });
+    if (gyroMsg) { ctx.fillStyle = '#ff8a8a'; ctx.font = 'bold 14px sans-serif'; ctx.fillText(gyroMsg, W / 2, 68, W - 32); }
+  } else if (mode === 'gyroCal') {
+    // ジャイロの角度合わせ:今の傾きを水準器のように表示し、範囲に入ったらスタートできる
+    ctx.font = 'bold 26px sans-serif'; ctx.fillText('ジャイロ', W / 2, 42);
+    ctx.font = '15px sans-serif'; ctx.fillStyle = '#fffc';
+    ctx.fillText('スマホを縦に持ち、少し手前に傾けてね', W / 2, 82, W - 32);
+    ctx.fillText('スタートした時の角度が基準になります', W / 2, 106, W - 32);
+    const cx = W / 2, cy = Math.max(230, H * 0.42), R = Math.min(W, H) * 0.26;
+    // 範囲(前後 15〜75°、左右 ±20°)を四角で、今の傾きを丸で表す(中心 = 前後45°・左右0°)
+    const sx = R / 40, sy = R / 40; // 1度あたりの長さ
+    const zx = cx - GYRO_RANGE.gMax * sx, zy = cy - (45 - GYRO_RANGE.bMin) * sy;
+    const inRange = gyroInRange();
+    ctx.fillStyle = inRange ? '#5fd38a22' : '#ffffff10'; ctx.strokeStyle = inRange ? '#5fd38a' : '#fff6'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(zx, zy, GYRO_RANGE.gMax * 2 * sx, (GYRO_RANGE.bMax - GYRO_RANGE.bMin) * sy, 12); ctx.fill(); ctx.stroke();
+    ctx.strokeStyle = '#ffffff22'; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.stroke();
+    if (tilt.has) {
+      const dx = Math.max(-R, Math.min(R, tilt.g * sx)), dy = Math.max(-R, Math.min(R, (tilt.b - 45) * sy));
+      ctx.fillStyle = inRange ? '#5fd38a' : '#ffd76a'; ctx.beginPath(); ctx.arc(cx + dx, cy + dy, 14, 0, 7); ctx.fill();
+    }
+    ctx.font = 'bold 16px sans-serif';
+    let status, col;
+    if (!tilt.has) {
+      const waited = performance.now() - gyroCalAt > 1500;
+      status = waited ? 'この端末では傾きセンサーが使えないようです' : '傾きセンサーを準備中…'; col = '#fff9';
+    } else if (inRange) { status = 'この角度でOK。スタートを押してね'; col = '#5fd38a'; }
+    else { status = '丸が四角の中に入るように持ってね'; col = '#ffd76a'; }
+    ctx.fillStyle = col; ctx.fillText(status, W / 2, cy + R + 28, W - 32);
+    if (gyroMsg && !inRange) { ctx.fillStyle = '#ff8a8a'; ctx.font = '14px sans-serif'; ctx.fillText(gyroMsg, W / 2, cy + R + 54, W - 32); }
   } else if (mode === 'rename') {
     ctx.font = 'bold 26px sans-serif';
     ctx.fillText('名前の変更', W / 2, H / 2 - 110);
@@ -837,10 +1008,17 @@ function draw() {
     const r = b.circleRadius * (1 + Math.max(b.pop || 0, 0) * 0.25);
     ctx.drawImage(ballSprite(b.level), b.position.x - r, b.position.y - r, r * 2, r * 2);
   }
-  // 重力の向きを示す矢印(ゼロ重力では、スワイプ中だけ弾く向きと強さを表示)
-  if (gameMode !== 'zero' || down) {
-    // 強さ(1〜G_MAX)を 0〜1 にして、矢印の長さ・太さ・濃さに反映
-    const t = Math.max(0, Math.min(1, (gPow - 1) / (G_MAX - 1)));
+  if (padMode()) drawPad();
+  // ゼロ重力の押すボール
+  if (pusher) {
+    const r = pusher.circleRadius;
+    ctx.fillStyle = '#ffffffd0'; ctx.beginPath(); ctx.arc(pusher.position.x, pusher.position.y, r, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#ffd76a'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(pusher.position.x, pusher.position.y, r, 0, 7); ctx.stroke();
+  }
+  // 重力の向きを示す矢印(スワイプとジャイロ。パッドはパッド自体で、ゼロ重力は重力がないので出さない)
+  if (gameMode !== 'zero' && !padMode() && gPow > 0.05) {
+    // 強さを 0〜1 にして、矢印の長さ・太さ・濃さに反映(スワイプは 1〜G_MAX、ジャイロは 0〜G_MAX)
+    const t = gameMode === 'gyro' ? Math.min(1, gPow / G_MAX) : Math.max(0, Math.min(1, (gPow - 1) / (G_MAX - 1)));
     const cx = W / 2, cy = H / 2, L = (25 + 40 * t) * S; // 半分の長さ。全長は弱い時50px〜強い時130px(標準画面)
     const m = Math.hypot(gNow.x, gNow.y) || 1, ux = gNow.x / m, uy = gNow.y / m;
     ctx.strokeStyle = `rgba(255,255,255,${0.2 + 0.25 * t})`; ctx.lineWidth = 3 + 2 * t; ctx.lineCap = 'round';
@@ -856,7 +1034,7 @@ function draw() {
   ctx.fillStyle = warn ? '#ff6b6b' : '#fffa';
   ctx.fillText(`数 ${balls.length}/${LIMIT}`, 12, 12);
   ctx.fillStyle = '#fff6'; ctx.font = 'bold 13px sans-serif';
-  ctx.fillText(MODES[gameMode].label, 12, 34);
+  ctx.fillText(MODES[gameMode].label + (padMode() ? '・パッド' : ''), 12, 34);
   ctx.fillStyle = '#fffa'; ctx.font = 'bold 16px sans-serif';
   ctx.textAlign = 'right';
   if (isTime(gameMode)) {
